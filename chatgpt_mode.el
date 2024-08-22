@@ -23,11 +23,12 @@
   "The name of the chatgpt-metadata buffer for the current conversation.")
 
 (defun chatgpt-call-api (prompt)
-  "Make an API call to OpenAI's GPT-4 and handle retries if necessary."
+  "Make an API call to OpenAI's GPT-4 and handle retries if necessary, except in the event of a timeout."
   (let ((attempt 0)
         (success nil)
-        (completed nil))  ;; Track when the callback completes
-    (while (and (< attempt (+ chatgpt-api-retry-count 1)) (not success))
+        (completed nil)
+        (timeout-occurred nil))  ;; Track if a timeout has occurred
+    (while (and (< attempt (+ chatgpt-api-retry-count 1)) (not success) (not timeout-occurred))
       (setq completed nil)  ;; Reset completion tracker for each attempt
       (condition-case err
           (progn
@@ -70,19 +71,28 @@
                             (setq success t
                                   completed t))))
               :error (cl-function
-                      (lambda (&key error-thrown &key _ &allow-other-keys)
+                      (lambda (&key error-thrown &key symbol-status &allow-other-keys)
                         (with-current-buffer chatgpt-metadata-buffer-name
                           (goto-char (point-max))
                           (insert (format "Error: %s\n" error-thrown)))
+                        (when (equal symbol-status 'timeout)
+                          (message "Request timed out.")
+                          (setq timeout-occurred t))  ;; Mark that a timeout occurred
+                        ;; Log the status for further debugging
+                        (message "Request failed with status: %s" symbol-status)
                         (setq completed t)))  ;; Mark the process as complete even on error
               :complete (cl-function
                          (lambda (&key response &allow-other-keys)
-                           (message "Request complete with status %s" (request-response-status-code response)))))
+                           (let ((status (request-response-status-code response)))
+                             (if status
+                                 (message "Request complete with status %s" status)
+                               (message "Request complete, but status is nil (possibly a timeout).")))
+                           (setq completed t))))  ;; Ensure completed is set to avoid hanging
             ;; Wait for the callback to complete before continuing
             (while (not completed)
               (accept-process-output nil 0.1))  ;; Wait a short interval for completion
             (unless success
-              (when (< attempt chatgpt-api-retry-count)
+              (when (and (< attempt chatgpt-api-retry-count) (not timeout-occurred))
                 (chatgpt-log-retry-message attempt)
                 (sleep-for (nth attempt chatgpt-api-backoff-intervals)))))
         (error
