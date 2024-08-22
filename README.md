@@ -22,6 +22,7 @@ An LL(m) ema(cs) r(epl)
 ## Next steps:
 
 1. Move from all emacs to langchain/python backend
+   1. As part of that, handle token-limit responses with either streaming or subsequent API calls
 2. Formalize the prompt and structured responses
    1. Additionally, prompt should be configurable?
 3. Start down the road to self-editing
