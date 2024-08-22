@@ -45,24 +45,27 @@
                                                              "  \"executable\": \"...\"\n"
                                                              "}\n"
                                                              "\nHere is the prompt:\n" prompt)))])
-                       ("max_tokens" . 300)))
+                       ("max_tokens" . 500)))
               :parser 'json-read
               :timeout 30
               :success (cl-function
                         (lambda (&key data &allow-other-keys)
                           (let* ((choices (assoc-default 'choices data))
                                  (message (assoc-default 'message (aref choices 0)))
-                                 (content (assoc-default 'content message))
-                                 (parsed-response (ignore-errors (json-read-from-string content)))
-                                 (conversational (assoc-default 'conversational parsed-response))
-                                 (executable (assoc-default 'executable parsed-response)))
-                            (with-current-buffer "*chatgpt-conversational*"
-                              (insert (concat (or conversational "No conversational content found.") "\n")))
-                            (with-current-buffer "*chatgpt-executable*"
-                              (insert (concat (or executable "No executable content found.") "\n")))
+                                 (content (assoc-default 'content message)))
+                            ;; Log the raw content to the chatgpt-log buffer
                             (with-current-buffer chatgpt-log-buffer-name
                               (goto-char (point-max))
-                              (insert (format "ChatGPT: %s\n" content)))
+                              (insert (format "ChatGPT (Raw Response): %s\n" content)))
+                            ;; Now parse the content for conversational and executable parts
+                            (let* ((parsed-response (ignore-errors (json-read-from-string content)))
+                                   (conversational (assoc-default 'conversational parsed-response))
+                                   (executable (assoc-default 'executable parsed-response)))
+                              ;; Insert parsed content into relevant buffers
+                              (with-current-buffer "*chatgpt-conversational*"
+                                (insert (concat (or conversational "No conversational content found.") "\n")))
+                              (with-current-buffer "*chatgpt-executable*"
+                                (insert (concat (or executable "No executable content found.") "\n"))))
                             ;; Mark the request as successful and complete
                             (setq success t
                                   completed t))))
