@@ -38,7 +38,7 @@
               :headers `(("Authorization" . ,(concat "Bearer " chatgpt-api-key))
                          ("Content-Type" . "application/json"))
               :data (json-encode
-                     `(("model" . "gpt-4")
+                     `(("model" . "gpt-4o")
                        ("messages" . [(( "role" . "user")
                                        ("content" . ,(concat "Please respond in **this exact format** (JSON), with no deviations or additional fields:\n"
                                                              "{\n"
