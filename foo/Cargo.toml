@@ -1,0 +1,10 @@
+[package]
+name = "foo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+langchain-rust = "4.3.0"
+serde_json = "1.0.127"
+simplelog = "0.12.2"
+tokio = "1.39.3"

@@ -1,0 +1,9 @@
+[package]
+name = "langchain_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+llm-chain = "0.13.0"
+llm-chain-openai = "0.13.0"
+tokio = "1.39.3"
