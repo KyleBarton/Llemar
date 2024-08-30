@@ -30,6 +30,8 @@ impl LlmClient {
   }
 
   async fn from_stream(&self, prompt: &str) -> Result<&str, String> {
+    //This doesn't work because completions is an old legacy endpoint. You want chat completions.
+    // See example here: https://github.com/64bit/async-openai/blob/main/examples/chat-stream/src/main.rs
     let request = CreateCompletionRequestArgs::default()
       .model("gpt-3.5-turbo-instruct") // TODO doesn't seem to work with any other models?
       .n(1)
