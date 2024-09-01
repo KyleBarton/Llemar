@@ -1,13 +1,21 @@
 use serde::{de::DeserializeOwned, Serialize, Deserialize};
 use async_openai::{config::OpenAIConfig, Client};
 use async_openai::types::{ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest, CreateChatCompletionRequestArgs};
-use futures::StreamExt;
+use futures::{Future, StreamExt};
 use std::fmt::Write;
 
 pub struct LlmConversation {
   messages: Vec<ChatCompletionRequestMessage>,
 }
 impl LlmConversation {
+  // TODO, injecting client here so we can potentially have different
+  // response outputs in the same convo. Is that actually important?
+  pub async fn chat<T>(&mut self, prompt: String, client: impl LlmClientV2<T>) -> Result<CompletionResponse<T>, String>
+  where T: Serialize + DeserializeOwned
+  {
+    client.complete_v2(&prompt).await
+  }
+  
   pub fn add_user_message(&mut self, message: String, name: Option<String>) {
     self.messages.push(
       ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
@@ -25,6 +33,7 @@ impl LlmConversation {
     )
   }
 }
+
 
 pub struct LlmClient {
   openai_client: Client<OpenAIConfig>,
@@ -70,6 +79,17 @@ impl LlmClient {
     println!("Writing {}", &response_writer);
     Ok(response_writer)
   }
+}
+
+pub trait LlmClientV2<T> where T: Serialize + DeserializeOwned {
+  fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<T>, String>>;
+}
+
+impl<T> LlmClientV2<T> for LlmClient where T: Serialize + DeserializeOwned {
+    fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<T>, String>>
+        where T: Serialize + DeserializeOwned {
+        self.complete(prompt)
+    }
 }
 
 fn to_structured_content<T>(raw: String, prompt: &str) -> Result<CompletionResponse<T>, String> where T: Serialize + DeserializeOwned {
@@ -129,17 +149,30 @@ struct ConversationExecutableSplitContent {
 #[cfg(test)]
 mod tests {
   use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent};
-use serde_json::json;
+  use futures::future;
+  use serde_json::json;
 
-use super::*;
+  use super::*;
+
+  struct TestClient;
+  impl LlmClientV2<TestContent> for TestClient {
+    fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<TestContent>, String>> {
+      return future::ready(Ok(CompletionResponse {
+	prompt: prompt.to_string(),
+	body: Some(TestContent { id: 1 }),
+      }))
+    }
+  }
 
   #[tokio::test]
-  #[ignore = "only works with a valid env, should be ignored most of the time"]
-  async fn returns_structured_data() {
-    let client = LlmClient::new();
+  async fn returns_structured_data_v2() {
+    let test_client = TestClient{};
+
+    let mut conversation = LlmConversation { messages: Vec::new() };
 
     let prompt = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
-    let structured_resp : CompletionResponse<TestContent> = client.complete(prompt).await.unwrap();
+
+    let structured_resp : CompletionResponse<TestContent> = conversation.chat(prompt.to_string(), test_client).await.unwrap();
 
     let test_content = TestContent { id: 1};
 
