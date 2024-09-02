@@ -8,12 +8,48 @@ pub struct LlmConversation {
   messages: Vec<ChatCompletionRequestMessage>,
 }
 impl LlmConversation {
-  // TODO, injecting client here so we can potentially have different
-  // response outputs in the same convo. Is that actually important?
-  pub async fn chat<T>(&mut self, prompt: String, client: impl LlmClientV2<T>) -> Result<CompletionResponse<T>, String>
+  pub fn new() -> Self {
+    Self {
+      messages: Vec::new(),
+    }
+  }
+
+  // TODO keeping this around as you'll probably want an instance function similar:
+  
+  // fn to_structured_content<T>(raw: String, prompt: &str) -> Result<CompletionResponse<T>, String> where T: Serialize + DeserializeOwned {
+  //     let deser : Result<T, serde_json::Error> =  serde_json::from_str(&raw);
+  //     match deser {
+  // 	      Err(e) => Err(e.to_string()),
+  // 	      Ok(t) => Ok(CompletionResponse::from_prompt(prompt).with_content(t))
+  // 	    }
+  // }
+
+  pub async fn chat<T>(&mut self, prompt: String, client: impl OpenAiChatClient<T>) -> Result<CompletionResponse<T>, String>
   where T: Serialize + DeserializeOwned
   {
-    client.complete_v2(&prompt).await
+    // TODO hacky
+    let mut msgs_with_new_prompt = self.messages.clone();
+    msgs_with_new_prompt.push(ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+      content: ChatCompletionRequestUserMessageContent::Text(prompt.clone()),
+      name: None,
+    }));
+
+
+    let mut request = request_from_prompt(&prompt); // TODo the borrow here and clone above can be simplified once I delete some code
+
+    request.messages = msgs_with_new_prompt;
+
+    //End hackiness
+
+    match client.chat_complete(request).await {
+      Err(s) => Err(s),
+      Ok(resp) => {
+	self.add_user_message(prompt.clone(), None);
+	let structured_resp : T = serde_json::from_str(&resp).unwrap(); // TODO handle
+	self.add_assistant_message(resp);
+	Ok(CompletionResponse::from_prompt(&prompt).with_content(structured_resp))
+      }
+    }
   }
   
   pub fn add_user_message(&mut self, message: String, name: Option<String>) {
@@ -35,28 +71,21 @@ impl LlmConversation {
 }
 
 
-pub struct LlmClient {
+pub struct OpenAiClientImpl {
   openai_client: Client<OpenAIConfig>,
 }
 
-impl LlmClient {
+impl Default for OpenAiClientImpl{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenAiClientImpl {
   pub fn new() -> Self {
     Self {
       openai_client: Client::new(),
     }
-  }
-
-  pub async fn complete<T>(&self, prompt: &str) -> Result<CompletionResponse<T>, String>
-    where T: Serialize + DeserializeOwned
-  {
-    let request = request_from_prompt(prompt);
-    match self.from_stream(request).await {
-      Err(s) => Err(s),
-      Ok(raw) => {
-	to_structured_content(raw, prompt)
-      }
-    }
-    
   }
 
   async fn from_stream(&self, request: CreateChatCompletionRequest) -> Result<String, String> {
@@ -81,23 +110,15 @@ impl LlmClient {
   }
 }
 
-pub trait LlmClientV2<T> where T: Serialize + DeserializeOwned {
-  fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<T>, String>>;
+pub trait OpenAiChatClient<T> where T: Serialize + DeserializeOwned {
+  fn chat_complete(&self, request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>>;
 }
 
-impl<T> LlmClientV2<T> for LlmClient where T: Serialize + DeserializeOwned {
-    fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<T>, String>>
+impl<T> OpenAiChatClient<T> for OpenAiClientImpl where T: Serialize + DeserializeOwned {
+    fn chat_complete(&self, request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>>
         where T: Serialize + DeserializeOwned {
-        self.complete(prompt)
+        self.from_stream(request)
     }
-}
-
-fn to_structured_content<T>(raw: String, prompt: &str) -> Result<CompletionResponse<T>, String> where T: Serialize + DeserializeOwned {
-    let deser : Result<T, serde_json::Error> =  serde_json::from_str(&raw);
-    match deser {
-	      Err(e) => Err(e.to_string()),
-	      Ok(t) => Ok(CompletionResponse::from_prompt(prompt).with_content(t))
-	    }
 }
 
 fn request_from_prompt(prompt: &str) -> async_openai::types::CreateChatCompletionRequest {
@@ -116,7 +137,7 @@ fn request_from_prompt(prompt: &str) -> async_openai::types::CreateChatCompletio
 #[derive(Debug, PartialEq, Eq)]
 pub struct CompletionResponse<T>{
   prompt: String,
-  body: Option<T>,
+  pub body: Option<T>, // TODO see main.rs this needs wrapping
 }
 
 impl <T> CompletionResponse<T>
@@ -141,7 +162,7 @@ struct TestContent {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct ConversationExecutableSplitContent {
+pub struct ConversationExecutableSplitContent {
   conversational: String,
   executable: String,
 }
@@ -154,21 +175,21 @@ mod tests {
 
   use super::*;
 
+  //Tests needed: response is not serializable to the desired content; server error response from llm client for whatever reason; ?
+
+  #[derive(Default)]
   struct TestClient;
-  impl LlmClientV2<TestContent> for TestClient {
-    fn complete_v2(&self, prompt: &str) -> impl Future<Output=Result<CompletionResponse<TestContent>, String>> {
-      return future::ready(Ok(CompletionResponse {
-	prompt: prompt.to_string(),
-	body: Some(TestContent { id: 1 }),
-      }))
+  impl OpenAiChatClient<TestContent> for TestClient {
+    fn chat_complete(&self, _request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>> {
+      return future::ready(Ok("{\"id\":1}".to_string()))
     }
   }
 
   #[tokio::test]
   async fn returns_structured_data_v2() {
-    let test_client = TestClient{};
+    let test_client = TestClient::default();
 
-    let mut conversation = LlmConversation { messages: Vec::new() };
+    let mut conversation = LlmConversation::new();
 
     let prompt = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
 
@@ -195,17 +216,39 @@ mod tests {
     assert_eq!(openai_request.messages, expected_prompt_messages)
   }
 
-  #[test]
-  fn generates_structured_response_from_content() {
-    // Given
-    let prompt = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
-    let result = "{ \"id\": 1 }".to_string();
-    // When
-    let structured_response : CompletionResponse<TestContent> = to_structured_content(result, prompt).unwrap();
-    
-    // Then
-    assert_eq!(&structured_response.prompt, prompt);
-    assert_eq!(structured_response.body, Some(TestContent { id: 1 }));
+  #[tokio::test]
+  async fn chat_messages_extend_conversation() {
+    //given
+    let mut conversation = LlmConversation::new();
+    let prompt1 = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
+    let prompt2 = "Ok, now do it again";
+
+    conversation.chat(prompt1.to_string(), TestClient::default()).await.unwrap();
+
+    let user_msgs : Vec<&ChatCompletionRequestMessage> = conversation.messages.iter().filter(|s| if let ChatCompletionRequestMessage::User(..) = s {true} else {false} ).collect();
+
+    assert_eq!(user_msgs.len(), 1);
+
+    conversation.chat(prompt2.to_string(), TestClient::default()).await.unwrap();
+
+    let added_usr_msgs : Vec<&ChatCompletionRequestMessage> = conversation.messages.iter().filter(|s| if let ChatCompletionRequestMessage::User(..) = s {true} else {false} ).collect();
+
+    assert_eq!(added_usr_msgs.len(), 2);
+
+    let assistant_msgs : Vec<&ChatCompletionRequestMessage> = conversation.messages
+      .iter()
+      .filter(|s| if let ChatCompletionRequestMessage::Assistant(..) = s { true} else {false} )
+      .collect();
+
+    let expected_assistant_msg = ChatCompletionRequestAssistantMessageArgs::default()
+      .content(serde_json::to_string(&TestContent { id: 1}).unwrap())
+      .build()
+      .unwrap();
+    assert_eq!(assistant_msgs, vec!(
+      // Two of them since I hit the endpoint twice
+      &ChatCompletionRequestMessage::Assistant(expected_assistant_msg.clone()),
+      &ChatCompletionRequestMessage::Assistant(expected_assistant_msg),
+    ))
   }
 
   #[test]
