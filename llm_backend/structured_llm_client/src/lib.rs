@@ -24,7 +24,7 @@ impl LlmConversation {
   // 	    }
   // }
 
-  pub async fn chat<T>(&mut self, prompt: String, client: impl OpenAiChatClient<T>) -> Result<CompletionResponse<T>, String>
+  pub async fn chat<T>(&mut self, prompt: String, client: impl OpenAiChatClient) -> Result<CompletionResponse<T>, String>
   where T: Serialize + DeserializeOwned
   {
     // TODO hacky
@@ -110,13 +110,12 @@ impl OpenAiClientImpl {
   }
 }
 
-pub trait OpenAiChatClient<T> where T: Serialize + DeserializeOwned {
+pub trait OpenAiChatClient{
   fn chat_complete(&self, request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>>;
 }
 
-impl<T> OpenAiChatClient<T> for OpenAiClientImpl where T: Serialize + DeserializeOwned {
-    fn chat_complete(&self, request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>>
-        where T: Serialize + DeserializeOwned {
+impl OpenAiChatClient for OpenAiClientImpl {
+    fn chat_complete(&self, request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>> {
         self.from_stream(request)
     }
 }
@@ -179,9 +178,10 @@ mod tests {
 
   #[derive(Default)]
   struct TestClient;
-  impl OpenAiChatClient<TestContent> for TestClient {
+  impl OpenAiChatClient for TestClient {
     fn chat_complete(&self, _request: CreateChatCompletionRequest) -> impl Future<Output=Result<String, String>> {
-      return future::ready(Ok("{\"id\":1}".to_string()))
+      let content = serde_json::to_string(&TestContent { id : 1}).unwrap();
+      return future::ready(Ok(content))
     }
   }
 
@@ -223,13 +223,13 @@ mod tests {
     let prompt1 = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
     let prompt2 = "Ok, now do it again";
 
-    conversation.chat(prompt1.to_string(), TestClient::default()).await.unwrap();
+    conversation.chat::<TestContent>(prompt1.to_string(), TestClient::default()).await.unwrap();
 
     let user_msgs : Vec<&ChatCompletionRequestMessage> = conversation.messages.iter().filter(|s| if let ChatCompletionRequestMessage::User(..) = s {true} else {false} ).collect();
 
     assert_eq!(user_msgs.len(), 1);
 
-    conversation.chat(prompt2.to_string(), TestClient::default()).await.unwrap();
+    conversation.chat::<TestContent>(prompt2.to_string(), TestClient::default()).await.unwrap();
 
     let added_usr_msgs : Vec<&ChatCompletionRequestMessage> = conversation.messages.iter().filter(|s| if let ChatCompletionRequestMessage::User(..) = s {true} else {false} ).collect();
 
