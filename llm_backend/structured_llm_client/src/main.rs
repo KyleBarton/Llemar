@@ -20,8 +20,14 @@ async fn main() {
 	    break;
 	  }
 	  prompt => {
-	    let resp = converation.chat::<ConversationExecutableSplitContent>(prompt.to_string(), OpenAiClientImpl::new()).await.unwrap();
-	    println!("{}", serde_json::to_string(&resp.body).unwrap());
+	    match converation.chat::<ConversationExecutableSplitContent>(prompt.to_string(), OpenAiClientImpl::new()).await {
+	      Ok(resp) => {
+		println!("{}", serde_json::to_string(&resp.body).unwrap());
+	      },
+	      Err(e) => {
+		println!("Received an error: {}", e);
+	      }
+	    }
 	  }
 	}
       }

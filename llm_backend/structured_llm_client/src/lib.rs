@@ -1,7 +1,8 @@
 use serde::{de::DeserializeOwned, Serialize, Deserialize};
 use async_openai::{config::OpenAIConfig, Client};
-use async_openai::types::{ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest, CreateChatCompletionRequestArgs};
+use async_openai::types::{ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema};
 use futures::{Future, StreamExt};
+use serde_json::json;
 use std::fmt::Write;
 
 pub struct LlmConversation {
@@ -14,18 +15,8 @@ impl LlmConversation {
     }
   }
 
-  // TODO keeping this around as you'll probably want an instance function similar:
-  
-  // fn to_structured_content<T>(raw: String, prompt: &str) -> Result<CompletionResponse<T>, String> where T: Serialize + DeserializeOwned {
-  //     let deser : Result<T, serde_json::Error> =  serde_json::from_str(&raw);
-  //     match deser {
-  // 	      Err(e) => Err(e.to_string()),
-  // 	      Ok(t) => Ok(CompletionResponse::from_prompt(prompt).with_content(t))
-  // 	    }
-  // }
-
   pub async fn chat<T>(&mut self, prompt: String, client: impl OpenAiChatClient) -> Result<CompletionResponse<T>, String>
-  where T: Serialize + DeserializeOwned
+  where T: StructuredContent
   {
     // TODO hacky
     let mut msgs_with_new_prompt = self.messages.clone();
@@ -35,7 +26,7 @@ impl LlmConversation {
     }));
 
 
-    let mut request = request_from_prompt(&prompt); // TODo the borrow here and clone above can be simplified once I delete some code
+    let mut request = request_from_prompt::<T>(&prompt); // TODo the borrow here and clone above can be simplified once I delete some code
 
     request.messages = msgs_with_new_prompt;
 
@@ -101,11 +92,13 @@ impl OpenAiClientImpl {
 	  }
 	});
 	},
-	Err(e) => return Err(e.to_string())
+	Err(e) => {
+	  println!("Error from open ai: {}", e);
+	  return Err(e.to_string());
+	}
       }
       
     };
-    println!("Writing {}", &response_writer);
     Ok(response_writer)
   }
 }
@@ -120,16 +113,29 @@ impl OpenAiChatClient for OpenAiClientImpl {
     }
 }
 
-fn request_from_prompt(prompt: &str) -> async_openai::types::CreateChatCompletionRequest {
-    let request = CreateChatCompletionRequestArgs::default()
-        .model("gpt-4o")
-        .max_tokens(256u32)
-        .messages([ChatCompletionRequestUserMessageArgs::default()
-            .content(prompt)
-            .build().unwrap()
-            .into()])
-        .build().unwrap();
-    request
+fn request_from_prompt<T>(prompt: &str) -> async_openai::types::CreateChatCompletionRequest
+where T: StructuredContent
+{
+
+  let response_format = ResponseFormat::JsonSchema{
+    json_schema: ResponseFormatJsonSchema {
+      description: Some(T::description()),
+      name: T::name(),
+      schema: Some(T::schema()),
+      strict: Some(true),
+    }
+  };
+
+  let request = CreateChatCompletionRequestArgs::default()
+    .model("gpt-4o-2024-08-06")
+    .max_tokens(256u32)
+    .messages([ChatCompletionRequestUserMessageArgs::default()
+	       .content(prompt)
+	       .build().unwrap()
+	       .into()])
+    .response_format(response_format)
+    .build().unwrap();
+  request
 }
 
 // TODO rename I think
@@ -155,26 +161,82 @@ impl <T> CompletionResponse<T>
   }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 struct TestContent {
   id: u8,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+impl StructuredContent for TestContent {
+    fn name() -> String {
+        "Test Content".into()
+    }
+
+    fn description() -> String {
+        "A sample structured object that contains only a simple id field".into()
+    }
+
+    fn schema() -> serde_json::Value {
+      json!({
+	"type": "object",
+	"properties": {
+	  "id": {
+	    "type": "number",
+	    "description": "the id of the object"
+	  }
+	}
+      })
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ConversationExecutableSplitContent {
   conversational: String,
   executable: String,
 }
 
+impl StructuredContent for ConversationExecutableSplitContent {
+  fn name() -> String {
+    "Conversational_Executable".into()
+  }
+
+  fn description() -> String {
+    "An object representing both conversational response content and structured executable content".into()
+  }
+
+  //TODO so much of this needs to be enforced
+  fn schema() -> serde_json::Value {
+    json!({
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversational", "executable"],
+      "properties": {
+	"conversational": {
+	  "type": "string",
+	  "description": "the field for plain language, conversational chat response content"
+	},
+	"executable": {
+	  "type": "string",
+	  "description": "the field for any executable code produced as part of the response content. This should be left blank unless executable content is explicitly requested"
+	}
+      }
+    })
+  }
+}
+
+pub trait StructuredContent : Serialize + DeserializeOwned + Default {
+  fn name() -> String;
+  fn description() -> String;
+  fn schema() -> serde_json::Value;
+}
+
 #[cfg(test)]
 mod tests {
-  use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent};
+  use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ResponseFormat, ResponseFormatJsonSchema};
   use futures::future;
-  use serde_json::json;
 
   use super::*;
 
-  //Tests needed: response is not serializable to the desired content; server error response from llm client for whatever reason; ?
+  //Tests needed: response is not serializable to the desired content; server error response from llm client for whatever reason; additionalProperties=false and required=[all the fields] are included in the given schema
 
   #[derive(Default)]
   struct TestClient;
@@ -206,7 +268,7 @@ mod tests {
     let prompt = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
 
     // When
-    let openai_request = request_from_prompt(prompt);
+    let openai_request = request_from_prompt::<TestContent>(prompt);
 
     // Then
     let expected_prompt_messages = vec!(
@@ -215,6 +277,28 @@ mod tests {
 
     assert_eq!(openai_request.messages, expected_prompt_messages)
   }
+
+  #[test]
+  fn creates_request_with_structured_instructions() {
+    // Given
+    let prompt = "Respond with exactly the following json content with nothing else: { \"id\": 1 }";
+
+    // When
+    let openai_request = request_from_prompt::<TestContent>(prompt);
+
+    let expected_response_format = Some(ResponseFormat::JsonSchema{
+      json_schema: ResponseFormatJsonSchema {
+	schema: Some(TestContent::schema()),
+	description: Some(TestContent::description()),
+	name: TestContent::name(),
+	strict: Some(true),
+      }
+    });
+
+    assert_eq!(openai_request.response_format, expected_response_format)
+
+  }
+
 
   #[tokio::test]
   async fn chat_messages_extend_conversation() {
@@ -249,17 +333,5 @@ mod tests {
       &ChatCompletionRequestMessage::Assistant(expected_assistant_msg.clone()),
       &ChatCompletionRequestMessage::Assistant(expected_assistant_msg),
     ))
-  }
-
-  #[test]
-  #[ignore = "just playing around"]
-  fn foo() {
-    let content = TestContent { id: 0 };
-
-    
-    // Output of this
-    //  left: ""
-    // right: Object {"id": Number(0)}
-    assert_eq!("", json!(content));
   }
 }
