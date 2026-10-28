@@ -1,0 +1,784 @@
+;;; llemar.el --- Talk to a pi agent in an org buffer  -*- lexical-binding: t; -*-
+
+;; Author: Kyle Barton
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1"))
+;; Keywords: tools, convenience
+
+;;; Commentary:
+
+;; Llemar is an Emacs front end for pi (https://pi.dev), a minimal agent
+;; harness.  It runs `pi --mode rpc' as a subprocess per conversation buffer
+;; and renders the session into an org-mode document: user prompts, assistant
+;; text, thinking drawers, and tool calls with their results, all as a
+;; foldable org tree.
+;;
+;; Usage:
+;;
+;;   M-x llemar               start a conversation in the current window
+;;   M-x llemar-other-window  start one in another window
+;;   C-u M-x llemar           prompt for the agent's working directory
+;;
+;; In a Llemar buffer, type under the trailing "* User" heading and press
+;; C-c C-c to send.  The reply streams in below it.
+;;
+;;   C-c C-c  send the trailing user prompt
+;;   C-c C-k  abort the current run
+;;   C-c C-s  steer a running agent
+;;   C-c C-n  start a fresh session
+;;   C-c C-r  restart the pi process
+;;   C-c C-i  report session state
+;;   C-c C-l  show the pi stderr log
+;;
+;; The buffer is an ordinary org buffer, so folding, links, export, and C-x C-w
+;; all work as usual.
+
+;;; Code:
+
+(require 'org)
+(require 'json)
+(require 'seq)
+(require 'cl-lib)
+(require 'subr-x)
+
+;;;; Customization
+
+(defgroup llemar nil
+  "Emacs front end for the pi agent harness."
+  :group 'tools
+  :prefix "llemar-")
+
+(defcustom llemar-executable "pi"
+  "Name of or path to the pi executable."
+  :type 'string)
+
+(defcustom llemar-extra-args nil
+  "Extra command line arguments passed to pi.
+
+Llemar always supplies `--mode rpc'.  Use this for things like
+\\=(\"--provider\" \"anthropic\" \"--model\" \"claude-opus-5\")."
+  :type '(repeat string))
+
+(defcustom llemar-buffer-name-function #'llemar-default-buffer-name
+  "Function returning the buffer name for a conversation.
+Called with one argument, the agent's working directory."
+  :type 'function)
+
+(defcustom llemar-max-tool-result-lines 100
+  "Maximum number of lines of tool output to insert into the buffer.
+Longer results are truncated with a note.  Set to nil to insert everything."
+  :type '(choice (const :tag "No limit" nil) integer))
+
+(defcustom llemar-show-thinking t
+  "Whether to render assistant thinking blocks into a THINKING drawer."
+  :type 'boolean)
+
+(defcustom llemar-fold-thinking t
+  "Whether to collapse a thinking drawer once the agent finishes it.
+The drawer streams in visibly and folds when complete."
+  :type 'boolean)
+
+(defcustom llemar-fold-blocks t
+  "Whether to collapse tool argument and result blocks as they are written."
+  :type 'boolean)
+
+(defcustom llemar-user-heading "User"
+  "Headline text marking a user prompt."
+  :type 'string)
+
+(defcustom llemar-assistant-heading "Assistant"
+  "Headline text marking an assistant response."
+  :type 'string)
+
+;;;; Buffer-local state
+
+(defvar-local llemar--process nil
+  "The pi RPC process serving this buffer.")
+
+(defvar-local llemar--insert-marker nil
+  "Marker where streamed assistant output is appended.")
+
+(defvar-local llemar--tool-markers nil
+  "Hash table mapping a tool call id to a marker in this buffer.")
+
+(defvar-local llemar--callbacks nil
+  "Hash table mapping a request id to a response callback.")
+
+(defvar-local llemar--request-counter 0
+  "Counter used to mint unique RPC request ids.")
+
+(defvar-local llemar--busy nil
+  "Non-nil while the agent is running.")
+
+(defvar-local llemar--status nil
+  "Short string describing what the agent is doing, or nil.")
+
+(defvar-local llemar--streamed-blocks nil
+  "Hash table of content indices that received streaming deltas.")
+
+;;;; Process management
+
+(defun llemar-default-buffer-name (directory)
+  "Return a conversation buffer name for DIRECTORY."
+  (format "*llemar: %s*"
+          (file-name-nondirectory (directory-file-name directory))))
+
+(defun llemar--log-buffer-name (buffer)
+  "Return the name of the stderr log buffer for BUFFER."
+  (format "*llemar-log: %s*" (buffer-name buffer)))
+
+(defun llemar--process-live-p (&optional buffer)
+  "Return non-nil if BUFFER has a live pi process."
+  (with-current-buffer (or buffer (current-buffer))
+    (and llemar--process (process-live-p llemar--process))))
+
+(defun llemar--start-process ()
+  "Start a pi RPC process for the current buffer."
+  (when (llemar--process-live-p)
+    (user-error "This buffer already has a running pi process"))
+  (unless (executable-find llemar-executable)
+    (user-error "Cannot find `%s'.  Install pi from https://pi.dev"
+                llemar-executable))
+  (let* ((conversation (current-buffer))
+         (log (get-buffer-create (llemar--log-buffer-name conversation)))
+         (args (append (list "--mode" "rpc") llemar-extra-args))
+         (process
+          (make-process
+           :name (format "llemar-pi: %s" (buffer-name conversation))
+           :buffer nil
+           :command (cons llemar-executable args)
+           :connection-type 'pipe
+           :coding '(utf-8-unix . utf-8-unix)
+           :noquery t
+           :stderr log
+           :filter #'llemar--process-filter
+           :sentinel #'llemar--process-sentinel)))
+    (process-put process 'llemar-conversation conversation)
+    (process-put process 'llemar-pending "")
+    (setq llemar--process process)
+    (llemar--set-status nil)
+    process))
+
+(defun llemar--process-sentinel (process event)
+  "Report EVENT for PROCESS in its conversation buffer."
+  (let ((conversation (process-get process 'llemar-conversation)))
+    (when (buffer-live-p conversation)
+      (with-current-buffer conversation
+        (unless (process-live-p process)
+          (setq llemar--busy nil)
+          (llemar--set-status "dead")
+          (llemar--note (format "pi process %s" (string-trim event))))))))
+
+(defun llemar--process-filter (process chunk)
+  "Accumulate CHUNK from PROCESS and dispatch whole JSONL records.
+
+Records are split on LF only, as the pi RPC protocol requires: Unicode
+line and paragraph separators are legal inside JSON strings and must not
+be treated as record boundaries."
+  (let* ((pending (concat (process-get process 'llemar-pending) chunk))
+         (lines (split-string pending "\n"))
+         ;; The final element is either an incomplete record or "".
+         (leftover (car (last lines)))
+         (complete (butlast lines))
+         (conversation (process-get process 'llemar-conversation)))
+    (process-put process 'llemar-pending leftover)
+    (when (buffer-live-p conversation)
+      (dolist (line complete)
+        (let ((line (string-remove-suffix "\r" line)))
+          (unless (string-empty-p (string-trim line))
+            (let ((record (llemar--parse-json line)))
+              (if record
+                  (with-current-buffer conversation
+                    (condition-case err
+                        (llemar--handle-record record line)
+                      ;; Keep consuming the stream: a rendering failure
+                      ;; must not strand the session.
+                      (error
+                       (llemar--log conversation
+                                    (format "error rendering %s: %s\n  %s"
+                                            (alist-get 'type record)
+                                            (error-message-string err)
+                                            line)))))
+                (llemar--log conversation
+                             (format "unparseable record: %s" line))))))))))
+
+(defun llemar--parse-json (string)
+  "Parse STRING as a protocol record, or return nil on failure."
+  (condition-case nil
+      (json-parse-string string
+                         :object-type 'alist
+                         :array-type 'list
+                         :null-object nil
+                         :false-object nil)
+    (error nil)))
+
+(defun llemar--log (conversation text)
+  "Append TEXT to the stderr log buffer belonging to CONVERSATION."
+  (with-current-buffer (get-buffer-create (llemar--log-buffer-name conversation))
+    (goto-char (point-max))
+    (insert text "\n")))
+
+;;;; Sending commands
+
+(defun llemar--send (command &optional callback)
+  "Send COMMAND, an alist, to this buffer's pi process.
+CALLBACK, if given, is called in this buffer with the response record."
+  (unless (llemar--process-live-p)
+    (user-error "No live pi process in this buffer (C-c C-r to restart)"))
+  (let* ((id (format "r%d" (cl-incf llemar--request-counter)))
+         (record (cons (cons 'id id) command)))
+    (when callback
+      (puthash id callback llemar--callbacks))
+    (process-send-string llemar--process (concat (json-serialize record) "\n"))
+    id))
+
+;;;; Buffer rendering helpers
+
+(defun llemar--marker ()
+  "Return the live insertion marker for this buffer."
+  (unless (and (markerp llemar--insert-marker)
+               (marker-position llemar--insert-marker))
+    (setq llemar--insert-marker (copy-marker (point-max) t)))
+  llemar--insert-marker)
+
+(defun llemar--insert (marker text)
+  "Insert TEXT at MARKER, keeping org structure intact.
+
+Any line of TEXT that would begin a new headline at column 0 is
+prefixed with a space, so assistant prose such as a markdown \"**bold**\"
+run cannot silently restructure the document."
+  (when (and text (not (string-empty-p text)))
+    (save-excursion
+      (goto-char marker)
+      (let ((scan (copy-marker (line-beginning-position) nil)))
+        (insert text)
+        (save-excursion
+          (goto-char scan)
+          (while (< (point) marker)
+            (when (and (bolp) (eq (char-after) ?*))
+              (insert " "))
+            (forward-line 1)))
+        (set-marker scan nil)))))
+
+(defun llemar--insert-newline (marker)
+  "Ensure MARKER sits at the beginning of a line."
+  (save-excursion
+    (goto-char marker)
+    (unless (bolp)
+      (insert "\n"))))
+
+(defun llemar--insert-heading (marker level title)
+  "Insert an org heading of LEVEL with TITLE at MARKER."
+  (llemar--insert-newline marker)
+  (save-excursion
+    (goto-char marker)
+    (unless (or (bobp)
+                (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$")))
+      (insert "\n"))
+    (insert (make-string level ?*) " " title "\n")))
+
+(defun llemar--note (text)
+  "Insert TEXT as an org comment line at the insertion marker."
+  (let ((marker (llemar--marker)))
+    (llemar--insert-newline marker)
+    (save-excursion
+      (goto-char marker)
+      (insert "# " text "\n"))))
+
+(defun llemar--escape-block-body (text)
+  "Escape TEXT so it cannot escape the org block containing it.
+
+Inside a block, org still scans for headlines and for block terminators,
+so lines beginning with asterisks or `#+\=' are escaped with a leading
+comma.  Org strips that comma again on display and export."
+  (replace-regexp-in-string "^\\(,*\\(?:\\*+\\|#\\+\\)\\)" ",\\1" text))
+
+(defun llemar--truncate (text max-lines)
+  "Truncate TEXT to MAX-LINES lines, noting how much was dropped."
+  (if (null max-lines)
+      text
+    (let ((lines (split-string text "\n")))
+      (if (<= (length lines) max-lines)
+          text
+        (concat (string-join (seq-take lines max-lines) "\n")
+                (format "\n... (%d more lines)"
+                        (- (length lines) max-lines)))))))
+
+(defun llemar--insert-block (marker begin body &optional end)
+  "Insert an org block at MARKER delimited by BEGIN and END around BODY.
+The block is collapsed unless `llemar-fold-blocks\=' is nil."
+  (let ((end (or end "#+end_example")))
+    (llemar--insert-newline marker)
+    (save-excursion
+      (goto-char marker)
+      (let ((start (point)))
+        (insert begin "\n"
+                (llemar--escape-block-body (string-trim-right body)) "\n"
+                end "\n")
+        (when llemar-fold-blocks
+          (llemar--fold start 'block))))))
+
+(defun llemar--display-arguments (call raw)
+  "Return the arguments of tool CALL for display.
+
+Protocol records are parsed with JSON null and false both mapped onto
+nil so that elisp truth tests work, but that conflates null, false, and
+the empty object.  Re-parsing RAW with the default sentinels keeps a
+tool\='s arguments faithful to what the agent actually sent."
+  (or (and raw
+           (let ((faithful
+                  (condition-case nil
+                      ;; Arrays stay vectors: as lists they would be
+                      ;; indistinguishable from alists on the way back out,
+                      ;; and `json-serialize' would read an array element
+                      ;; as an object key and signal.
+                      (json-parse-string raw :object-type 'alist
+                                         :array-type 'array)
+                    (error nil))))
+             (thread-last
+               faithful
+               (alist-get 'assistantMessageEvent)
+               (alist-get 'toolCall)
+               (alist-get 'arguments))))
+      (alist-get 'arguments call)))
+
+(defun llemar--fold (position kind)
+  "Collapse the drawer or block beginning at POSITION.
+KIND is `drawer\=' or `block\='.
+
+Org applies the `#+startup:\=' visibility settings when a buffer is first
+visited, which is long before a reply streams in, so anything written
+here has to be folded explicitly."
+  (save-excursion
+    (goto-char position)
+    (ignore-errors
+      (pcase kind
+        ('drawer (org-fold-hide-drawer-toggle t t))
+        ('block (org-fold-hide-block-toggle t t))))))
+
+(defun llemar--json-pretty (object)
+  "Return OBJECT serialized as indented JSON, or nil if it cannot be.
+OBJECT comes off the wire, so an unexpected shape degrades to no
+preview rather than breaking the transcript."
+  (condition-case nil
+      (with-temp-buffer
+        (insert (json-serialize object))
+        (ignore-errors (json-pretty-print-buffer))
+        (buffer-string))
+    (error nil)))
+
+(defun llemar--set-status (status)
+  "Set this buffer's activity STATUS and refresh the mode line."
+  (setq llemar--status status)
+  (setq mode-line-process
+        (cond ((and status llemar--busy) (format " [%s]" status))
+              (llemar--busy " [running]")
+              (status (format " [%s]" status))
+              (t nil)))
+  (force-mode-line-update))
+
+;;;; Tool call rendering
+
+(defun llemar--tool-marker (tool-call-id &optional tool-name)
+  "Return the marker where output for TOOL-CALL-ID belongs.
+Create a heading named TOOL-NAME if this tool call has not been seen.
+
+A tool\='s arguments and its result arrive separately, and several tools
+can be in flight at once, so each call keeps its own marker.  Markers
+that share a position and advance on insertion would all move together,
+which would file one tool\='s result under another tool\='s heading.  A
+blank line after the heading keeps this call\='s marker strictly before
+the shared insertion marker so the two cannot be confused."
+  (or (gethash tool-call-id llemar--tool-markers)
+      (let ((marker (llemar--marker)))
+        (llemar--insert-heading marker 2 (or tool-name "tool"))
+        (let ((section (marker-position marker)))
+          (save-excursion (goto-char marker) (insert "\n"))
+          (let ((own (copy-marker section t)))
+            (puthash tool-call-id own llemar--tool-markers)
+            own)))))
+
+(defun llemar--release-tool-markers ()
+  "Forget the tool markers recorded for this buffer."
+  (maphash (lambda (_id marker) (set-marker marker nil)) llemar--tool-markers)
+  (clrhash llemar--tool-markers))
+
+;;;; Record dispatch
+
+(defun llemar--handle-record (record &optional raw)
+  "Dispatch a protocol RECORD arriving on stdout.
+RAW is the undecoded JSON line the record was parsed from."
+  (if (equal (alist-get 'type record) "response")
+      (llemar--handle-response record)
+    (llemar--handle-event record raw)))
+
+(defun llemar--handle-response (record)
+  "Handle a command response RECORD."
+  (let* ((id (alist-get 'id record))
+         (callback (and id (gethash id llemar--callbacks))))
+    (when id (remhash id llemar--callbacks))
+    (unless (alist-get 'success record)
+      (let ((error-text (or (alist-get 'error record) "unknown error")))
+        (message "llemar: %s failed: %s"
+                 (or (alist-get 'command record) "command") error-text)
+        (llemar--note (format "error: %s" error-text))))
+    (when callback
+      (funcall callback record))))
+
+(defun llemar--handle-event (record &optional raw)
+  "Render a session event RECORD into this buffer.
+RAW is the JSON line RECORD was parsed from."
+  (pcase (alist-get 'type record)
+    ("agent_start"
+     (setq llemar--busy t)
+     (clrhash llemar--streamed-blocks)
+     (llemar--set-status "thinking"))
+    ("message_start"
+     (let ((role (alist-get 'role (alist-get 'message record))))
+       (when (equal role "assistant")
+         ;; Content indices restart with each message.
+         (clrhash llemar--streamed-blocks)
+         (llemar--open-assistant))))
+    ("message_update"
+     (llemar--handle-message-update (alist-get 'assistantMessageEvent record) raw))
+    ("tool_execution_start"
+     (llemar--tool-marker (alist-get 'toolCallId record)
+                          (alist-get 'toolName record))
+     (llemar--set-status (format "%s" (alist-get 'toolName record))))
+    ("tool_execution_end"
+     (llemar--render-tool-result record)
+     (llemar--set-status "thinking"))
+    ("agent_settled"
+     (setq llemar--busy nil)
+     (llemar--set-status nil)
+     (when (alist-get 'aborted record)
+       (llemar--note "aborted"))
+     (llemar--open-user-prompt))
+    ("auto_retry_start"
+     (llemar--set-status "retrying")
+     (llemar--note (format "retry %s/%s: %s"
+                           (alist-get 'attempt record)
+                           (alist-get 'maxAttempts record)
+                           (or (alist-get 'errorMessage record) ""))))
+    ("auto_retry_end"
+     (llemar--set-status (if (alist-get 'success record) "thinking" nil))
+     (unless (alist-get 'success record)
+       (llemar--note (format "retries exhausted: %s"
+                             (or (alist-get 'finalError record) "")))))
+    ("compaction_start"
+     (llemar--set-status "compacting"))
+    ("compaction_end"
+     (llemar--set-status "thinking")
+     (let ((result (alist-get 'result record)))
+       (llemar--note
+        (if result
+            (format "compacted: %s tokens -> %s"
+                    (alist-get 'tokensBefore result)
+                    (alist-get 'estimatedTokensAfter result))
+          (format "compaction did not complete: %s"
+                  (or (alist-get 'errorMessage record) "aborted"))))))
+    ("extension_error"
+     (llemar--log (current-buffer)
+                  (format "extension error in %s (%s): %s"
+                          (alist-get 'extensionPath record)
+                          (alist-get 'event record)
+                          (alist-get 'error record))))
+    ("session_info_changed"
+     (llemar--set-status llemar--status))
+    (_ nil)))
+
+(defun llemar--open-assistant ()
+  "Open a heading for one assistant turn.
+
+Every assistant message gets its own heading.  That keeps tool calls
+nested under the turn that made them, and means prose the agent emits
+after a tool result starts a new turn instead of landing inside the
+tool\='s subtree."
+  (llemar--insert-heading (llemar--marker) 1 llemar-assistant-heading))
+
+(defun llemar--handle-message-update (event &optional raw)
+  "Render a streaming assistant message EVENT.
+RAW is the JSON line EVENT arrived on, used to render tool arguments
+exactly as the agent sent them."
+  (let ((marker (llemar--marker)))
+    (pcase (alist-get 'type event)
+      ("text_delta"
+       (puthash (alist-get 'contentIndex event) t llemar--streamed-blocks)
+       (llemar--insert marker (alist-get 'delta event)))
+      ("text_end"
+       ;; Providers that do not stream send no deltas; use the final content.
+       (unless (gethash (alist-get 'contentIndex event) llemar--streamed-blocks)
+         (llemar--insert marker (alist-get 'content event))))
+      ("thinking_start"
+       (when llemar-show-thinking
+         (llemar--insert-newline marker)
+         (save-excursion (goto-char marker) (insert ":THINKING:\n"))))
+      ("thinking_delta"
+       (when llemar-show-thinking
+         (puthash (alist-get 'contentIndex event) t llemar--streamed-blocks)
+         (llemar--insert marker (alist-get 'delta event))))
+      ("thinking_end"
+       (when llemar-show-thinking
+         (unless (gethash (alist-get 'contentIndex event) llemar--streamed-blocks)
+           (llemar--insert marker (alist-get 'content event)))
+         (llemar--insert-newline marker)
+         (save-excursion (goto-char marker) (insert ":END:\n"))
+         (when llemar-fold-thinking
+           (save-excursion
+             (goto-char marker)
+             (when (re-search-backward "^[ \t]*:THINKING:[ \t]*$" nil t)
+               (llemar--fold (point) 'drawer))))))
+      ("toolcall_start"
+       (llemar--tool-marker (alist-get 'id event) (alist-get 'toolName event)))
+      ("toolcall_end"
+       (let* ((call (alist-get 'toolCall event))
+              (id (alist-get 'id call))
+              (args (llemar--display-arguments call raw)))
+         (when-let ((pretty (and args
+                                 (not (eq args :null))
+                                 (not (eq args :false))
+                                 (llemar--json-pretty args))))
+           (llemar--insert-block
+            (llemar--tool-marker id (alist-get 'name call))
+            "#+begin_src json" pretty "#+end_src"))))
+      ("error"
+       (llemar--note (format "stream error: %s"
+                             (or (alist-get 'error event)
+                                 (alist-get 'reason event)))))
+      (_ nil))))
+
+(defun llemar--render-tool-result (record)
+  "Insert the tool result carried by RECORD under its tool heading."
+  (let* ((id (alist-get 'toolCallId record))
+         (marker (llemar--tool-marker id (alist-get 'toolName record)))
+         (text (llemar--result-text (alist-get 'result record)))
+         (duration (alist-get 'durationMs record)))
+    (llemar--insert-block
+     marker
+     (if (alist-get 'isError record)
+         "#+begin_example error"
+       "#+begin_example")
+     (llemar--truncate (if (string-empty-p (string-trim (or text "")))
+                           "(no output)"
+                         text)
+                       llemar-max-tool-result-lines))
+    (when duration
+      (save-excursion
+        (goto-char marker)
+        (insert (format "# %sms\n" duration))))))
+
+(defun llemar--result-text (result)
+  "Extract the text content of a tool RESULT."
+  (string-join
+   (delq nil
+         (mapcar (lambda (block)
+                   (when (equal (alist-get 'type block) "text")
+                     (alist-get 'text block)))
+                 (alist-get 'content result)))
+   "\n"))
+
+;;;; Prompt handling
+
+(defun llemar--user-heading-regexp ()
+  "Return a regexp matching a top level user heading."
+  (format "^\\* %s[ \t]*$" (regexp-quote llemar-user-heading)))
+
+(defun llemar--last-prompt-bounds ()
+  "Return (START . END) of the body under the last user heading, or nil."
+  (save-excursion
+    (goto-char (point-max))
+    (when (re-search-backward (llemar--user-heading-regexp) nil t)
+      (forward-line 1)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\*+ " nil t)
+                     (match-beginning 0)
+                   (point-max))))
+        (cons start end)))))
+
+(defun llemar--open-user-prompt ()
+  "Append a fresh user heading and leave point ready for typing."
+  (let ((marker (llemar--marker)))
+    (llemar--insert-newline marker)
+    (save-excursion
+      (goto-char marker)
+      (insert "\n* " llemar-user-heading "\n"))
+    (when (eq (current-buffer) (window-buffer (selected-window)))
+      (goto-char (point-max)))))
+
+;;;; Interactive commands
+
+(defun llemar--new-conversation (directory)
+  "Create a conversation buffer for DIRECTORY and start pi inside it.
+DIRECTORY defaults to `default-directory\='.  The buffer is returned
+without being displayed."
+  (let* ((directory (file-name-as-directory
+                     (expand-file-name (or directory default-directory))))
+         (buffer (generate-new-buffer
+                  (funcall llemar-buffer-name-function directory))))
+    (condition-case err
+        (with-current-buffer buffer
+          (setq default-directory directory)
+          (llemar-mode)
+          (llemar--insert-preamble)
+          (llemar--start-process)
+          (goto-char (point-max)))
+      (error (kill-buffer buffer)
+             (signal (car err) (cdr err))))
+    buffer))
+
+(defun llemar--read-directory ()
+  "Return the agent's working directory, prompting given a prefix argument."
+  (when current-prefix-arg
+    (read-directory-name "Agent working directory: ")))
+
+;;;###autoload
+(defun llemar (&optional directory)
+  "Start a conversation with a pi agent in the current window.
+With a prefix argument, prompt for DIRECTORY as the agent's working
+folder.  See `llemar-other-window\=' to display it elsewhere instead."
+  (interactive (list (llemar--read-directory)))
+  (let ((buffer (llemar--new-conversation directory)))
+    (pop-to-buffer-same-window buffer)
+    buffer))
+
+;;;###autoload
+(defun llemar-other-window (&optional directory)
+  "Start a conversation with a pi agent in another window.
+With a prefix argument, prompt for DIRECTORY as the agent's working
+folder.  See `llemar\=' to take over the current window instead."
+  (interactive (list (llemar--read-directory)))
+  (let ((buffer (llemar--new-conversation directory)))
+    (pop-to-buffer buffer)
+    buffer))
+
+(defun llemar--insert-preamble ()
+  "Insert the org preamble and an empty user prompt into this buffer."
+  (insert (format "#+title: llemar %s\n#+startup: hideblocks\n\n"
+                  (format-time-string "%Y-%m-%d %H:%M")))
+  (insert "* " llemar-user-heading "\n"))
+
+(defun llemar-send ()
+  "Send the prompt under the last user heading to the agent."
+  (interactive)
+  (when llemar--busy
+    (user-error "Agent is running; use `llemar-steer' or `llemar-abort'"))
+  (let* ((bounds (or (llemar--last-prompt-bounds)
+                     (user-error "No `* %s' heading to send"
+                                 llemar-user-heading)))
+         (text (string-trim (buffer-substring-no-properties
+                             (car bounds) (cdr bounds)))))
+    (when (string-empty-p text)
+      (user-error "The prompt is empty"))
+    (set-marker (llemar--marker) (point-max))
+    (llemar--release-tool-markers)
+    (clrhash llemar--streamed-blocks)
+    (setq llemar--busy t)
+    (llemar--set-status "sending")
+    (llemar--send `((type . "prompt") (message . ,text))
+                  (lambda (response)
+                    (unless (alist-get 'success response)
+                      (setq llemar--busy nil)
+                      (llemar--set-status nil))))))
+
+(defun llemar-abort ()
+  "Abort the agent's current run."
+  (interactive)
+  (llemar--send '((type . "abort")))
+  (llemar--set-status "aborting"))
+
+(defun llemar-steer (message)
+  "Queue MESSAGE as a steering instruction for the running agent."
+  (interactive "sSteer: ")
+  (when (string-empty-p (string-trim message))
+    (user-error "Nothing to steer with"))
+  (llemar--send `((type . "steer") (message . ,message)))
+  (let ((marker (llemar--marker)))
+    (llemar--insert-heading marker 2 "Steering")
+    (llemar--insert marker (concat message "\n"))))
+
+(defun llemar-new-session ()
+  "Start a fresh pi session, clearing the conversation buffer."
+  (interactive)
+  (when (or (not llemar--busy)
+            (yes-or-no-p "Agent is running.  Start a new session anyway? "))
+    (llemar--send
+     '((type . "new_session"))
+     (lambda (response)
+       (if (alist-get 'cancelled (alist-get 'data response))
+           (message "llemar: new session cancelled by an extension")
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (setq llemar--busy nil)
+           (llemar--release-tool-markers)
+           (clrhash llemar--streamed-blocks)
+           (set-marker (llemar--marker) (point-max))
+           (llemar--insert-preamble)
+           (goto-char (point-max))
+           (llemar--set-status nil)))))))
+
+(defun llemar-restart ()
+  "Restart the pi process for this buffer."
+  (interactive)
+  (when (llemar--process-live-p)
+    ;; Closing stdin asks pi to shut down in an orderly way.
+    (process-send-eof llemar--process)
+    (delete-process llemar--process))
+  (setq llemar--busy nil)
+  (llemar--start-process)
+  (message "llemar: pi restarted"))
+
+(defun llemar-state ()
+  "Report the agent's current session state."
+  (interactive)
+  (llemar--send
+   '((type . "get_state"))
+   (lambda (response)
+     (let* ((data (alist-get 'data response))
+            (model (alist-get 'model data)))
+       (message "llemar: model %s, thinking %s, %s messages, session %s"
+                (or (alist-get 'id model) (alist-get 'name model) "?")
+                (or (alist-get 'thinkingLevel data) "?")
+                (or (alist-get 'messageCount data) 0)
+                (or (alist-get 'sessionId data) "?"))))))
+
+(defun llemar-show-log ()
+  "Show the pi stderr log for this conversation."
+  (interactive)
+  (pop-to-buffer (get-buffer-create (llemar--log-buffer-name (current-buffer)))))
+
+;;;; Mode
+
+(defvar-keymap llemar-mode-map
+  :doc "Keymap for `llemar-mode'."
+  "C-c C-c" #'llemar-send
+  "C-c C-k" #'llemar-abort
+  "C-c C-s" #'llemar-steer
+  "C-c C-n" #'llemar-new-session
+  "C-c C-r" #'llemar-restart
+  "C-c C-i" #'llemar-state
+  "C-c C-l" #'llemar-show-log)
+
+;;;###autoload
+(define-derived-mode llemar-mode org-mode "Llemar"
+  "Major mode for conversing with a pi agent in an org buffer.
+
+\\{llemar-mode-map}"
+  (setq llemar--tool-markers (make-hash-table :test #'equal))
+  (setq llemar--callbacks (make-hash-table :test #'equal))
+  (setq llemar--streamed-blocks (make-hash-table :test #'equal))
+  (setq llemar--insert-marker (copy-marker (point-max) t))
+  (setq-local org-hide-drawer-startup t)
+  (add-hook 'kill-buffer-hook #'llemar--cleanup nil t))
+
+(defun llemar--cleanup ()
+  "Shut down this buffer's pi process and discard its log buffer.
+Otherwise a log buffer outlives every conversation that ever ran."
+  (when (llemar--process-live-p)
+    (process-send-eof llemar--process)
+    (delete-process llemar--process))
+  (when-let ((log (get-buffer (llemar--log-buffer-name (current-buffer)))))
+    (kill-buffer log)))
+
+(provide 'llemar)
+
+;;; llemar.el ends here

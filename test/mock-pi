@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""A scriptable stand-in for `pi --mode rpc`.
+
+Llemar's tests drive this instead of the real pi: it speaks the same JSONL
+protocol but emits a fixed, named event script, so renderer behaviour can be
+asserted without a model, a network call, or any cost.
+
+Usage: mock-pi [--mode rpc] <scenario>
+"""
+import json
+import sys
+
+
+def emit(record):
+    # ensure_ascii=False so scenarios can carry real multibyte text.
+    sys.stdout.write(json.dumps(record, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def assistant_text(deltas, index=0):
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "text_start", "contentIndex": index}})
+    for delta in deltas:
+        emit({"type": "message_update", "usage": {},
+              "assistantMessageEvent": {"type": "text_delta",
+                                        "contentIndex": index, "delta": delta}})
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "text_end", "contentIndex": index,
+                                    "content": "".join(deltas)}})
+
+
+def thinking(deltas, index=0):
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "thinking_start", "contentIndex": index}})
+    for delta in deltas:
+        emit({"type": "message_update", "usage": {},
+              "assistantMessageEvent": {"type": "thinking_delta",
+                                        "contentIndex": index, "delta": delta}})
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "thinking_end", "contentIndex": index,
+                                    "content": "".join(deltas)}})
+
+
+def tool_call(call_id, name, arguments, index):
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "toolcall_start", "contentIndex": index,
+                                    "id": call_id, "toolName": name}})
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "toolcall_end", "contentIndex": index,
+                                    "toolCall": {"id": call_id, "name": name,
+                                                 "arguments": arguments}}})
+
+
+def tool_result(call_id, name, text, is_error=False, duration=7):
+    emit({"type": "tool_execution_start", "toolCallId": call_id,
+          "toolName": name, "args": {}})
+    emit({"type": "tool_execution_end", "toolCallId": call_id, "toolName": name,
+          "result": {"content": [{"type": "text", "text": text}]},
+          "isError": is_error, "durationMs": duration})
+
+
+def begin():
+    emit({"type": "agent_start"})
+    emit({"type": "turn_start"})
+    emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+
+
+def end_message():
+    emit({"type": "message_end", "message": {"role": "assistant", "content": []}})
+
+
+def settle():
+    emit({"type": "agent_end", "messages": [], "willRetry": False})
+    emit({"type": "agent_settled", "aborted": False})
+
+
+# Prose and tool output that collide with org syntax: a markdown bold run and
+# a bullet at column 0, a stray block terminator, and a would-be headline.
+HOSTILE_PROSE = ["Here is the plan.\n\n", "**Step one", "**: look around.\n",
+                 "* a bullet\n"]
+HOSTILE_OUTPUT = "README.md\nllemar.el\n#+end_example\n* not a heading"
+
+
+def scenario_basic():
+    begin()
+    thinking(["Let me ", "check the repo."])
+    assistant_text(HOSTILE_PROSE, index=1)
+    tool_call("call_1", "bash", {"command": "ls -la"}, index=2)
+    end_message()
+    tool_result("call_1", "bash", HOSTILE_OUTPUT, duration=12)
+    # A second turn whose text never streams: only text_end carries content.
+    emit({"type": "turn_start"})
+    emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    emit({"type": "message_update", "usage": {},
+          "assistantMessageEvent": {"type": "text_end", "contentIndex": 0,
+                                    "content": "Two files. Done."}})
+    end_message()
+    settle()
+
+
+def scenario_parallel():
+    begin()
+    assistant_text(["Checking two things  right now — café 日本語 \U0001F600\n"])
+    tool_call("call_a", "bash", {"command": "git status"}, index=1)
+    tool_call("call_b", "read_file", {"path": "README.md"}, index=2)
+    end_message()
+    # Results arrive in the opposite order to the calls.
+    tool_result("call_b", "read_file", "# Llemar\nAn LL(m) ema(cs) r(epl)", duration=3)
+    tool_result("call_a", "bash", "\n".join("line %d" % n for n in range(1, 31)),
+                is_error=True, duration=44)
+    settle()
+
+
+def scenario_nullargs():
+    begin()
+    tool_call("call_1", "read",
+              {"path": "README.md", "offset": None, "limit": None,
+               "recurse": False, "deep": True, "nested": {"a": 1},
+               "list": [1, None, False]}, index=0)
+    end_message()
+    tool_result("call_1", "read", "ok")
+    settle()
+
+
+def scenario_retry():
+    begin()
+    emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+          "delayMs": 1, "errorMessage": "529 overloaded"})
+    emit({"type": "auto_retry_end", "success": True, "attempt": 2})
+    assistant_text(["Recovered.\n"])
+    end_message()
+    settle()
+
+
+def scenario_hang():
+    emit({"type": "agent_start"})
+
+
+SCENARIOS = {
+    "basic": scenario_basic,
+    "parallel": scenario_parallel,
+    "nullargs": scenario_nullargs,
+    "retry": scenario_retry,
+    "hang": scenario_hang,
+}
+
+
+def main():
+    scenario = next((a for a in sys.argv[1:] if a in SCENARIOS), "basic")
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        command = json.loads(line)
+        kind, request = command.get("type"), command.get("id")
+        if kind == "prompt":
+            emit({"id": request, "type": "response", "command": "prompt",
+                  "success": True, "data": {"disposition": "started"}})
+            SCENARIOS[scenario]()
+        elif kind == "abort":
+            emit({"id": request, "type": "response", "command": "abort",
+                  "success": True})
+            emit({"type": "agent_settled", "aborted": True})
+        elif kind == "get_state":
+            emit({"id": request, "type": "response", "command": "get_state",
+                  "success": True,
+                  "data": {"model": {"id": "mock/model"}, "thinkingLevel": "medium",
+                           "isStreaming": False, "messageCount": 2,
+                           "sessionId": "mock-123"}})
+        elif kind == "set_model":
+            emit({"id": request, "type": "response", "command": "set_model",
+                  "success": False, "error": "Model not found: bogus"})
+        else:
+            emit({"id": request, "type": "response", "command": kind,
+                  "success": True, "data": {}})
+
+
+if __name__ == "__main__":
+    main()
