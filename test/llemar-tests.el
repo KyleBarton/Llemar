@@ -112,6 +112,73 @@ BODY runs inside the conversation buffer, which is killed afterwards."
       (should-not (eq (selected-window) start))
       (should (eq (window-buffer (selected-window)) conversation)))))
 
+;;;; Following streaming output
+
+(defmacro llemar-test-with-passive-conversation (window-var &rest body)
+  "Start a conversation displayed in an unselected window.
+WINDOW-VAR is bound to that window and the selected window keeps showing
+a scratch buffer, so only an explicit follow can move WINDOW-VAR's point.
+BUFFER is bound to the conversation buffer inside BODY."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let* ((llemar-executable llemar-test-mock)
+          (llemar-extra-args '("basic"))
+          (scratch (get-buffer-create "*llemar-test-scratch*"))
+          (buffer nil))
+     (unwind-protect
+         (save-window-excursion
+           (delete-other-windows)
+           (set-window-buffer (selected-window) scratch)
+           (let ((scratch-window (selected-window)))
+             (setq buffer (llemar-other-window llemar-test-directory))
+             (let ((,window-var (get-buffer-window buffer)))
+               (select-window scratch-window)
+               ,@body)))
+       (when (buffer-live-p buffer) (kill-buffer buffer))
+       (when (buffer-live-p scratch) (kill-buffer scratch)))))
+
+(defun llemar-test--type (buffer prompt)
+  "Type PROMPT under BUFFER's last user heading without sending it."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-max))
+      (insert prompt "\n"))))
+
+(defun llemar-test--send-and-settle (buffer)
+  "Send BUFFER's pending prompt and wait for the agent to settle."
+  (with-current-buffer buffer
+    (llemar-send)
+    (llemar-test--settle)))
+
+(ert-deftest llemar-test-follows-streaming-output ()
+  "A window whose cursor is at the prompt's end tracks the streamed reply."
+  (llemar-test-with-passive-conversation window
+    (llemar-test--type buffer "go")
+    ;; The user's cursor sits at the end of what they just typed.
+    (set-window-point window (with-current-buffer buffer (point-max)))
+    (llemar-test--send-and-settle buffer)
+    (should (= (window-point window)
+               (with-current-buffer buffer (point-max))))))
+
+(ert-deftest llemar-test-leaves-a-scrolled-up-window-alone ()
+  "A window scrolled up to read earlier output is not pulled to the end."
+  (llemar-test-with-passive-conversation window
+    (llemar-test--type buffer "go")
+    (set-window-point window (with-current-buffer buffer (point-min)))
+    (llemar-test--send-and-settle buffer)
+    (should (= (window-point window)
+               (with-current-buffer buffer (point-min))))))
+
+(ert-deftest llemar-test-following-can-be-disabled ()
+  "With `llemar-follow-output' nil, a window at the end is left in place."
+  (let ((llemar-follow-output nil))
+    (llemar-test-with-passive-conversation window
+      (llemar-test--type buffer "go")
+      (let ((start (with-current-buffer buffer (point-max))))
+        (set-window-point window start)
+        (llemar-test--send-and-settle buffer)
+        (should (= (window-point window) start))
+        (should (< start (with-current-buffer buffer (point-max))))))))
+
 ;;;; Folding
 
 (ert-deftest llemar-test-thinking-drawer-is-folded ()

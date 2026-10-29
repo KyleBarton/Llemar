@@ -82,6 +82,13 @@ The drawer streams in visibly and folds when complete."
   "Whether to collapse tool argument and result blocks as they are written."
   :type 'boolean)
 
+(defcustom llemar-follow-output t
+  "Whether windows showing the conversation scroll to follow streaming output.
+When non-nil, any window whose point sits at the end of the buffer tracks
+the response as it streams in, so the window stays on the latest output.
+A window scrolled up to read earlier output is left undisturbed."
+  :type 'boolean)
+
 (defcustom llemar-user-heading "User"
   "Headline text marking a user prompt."
   :type 'string)
@@ -405,12 +412,34 @@ the shared insertion marker so the two cannot be confused."
 
 ;;;; Record dispatch
 
+(defun llemar--windows-at-end ()
+  "Return windows showing this buffer whose point sits at its end.
+These are the windows that follow streamed output; a window scrolled up
+has its point before `point-max' and is excluded."
+  (when llemar-follow-output
+    (let ((end (point-max))
+          (windows nil))
+      (dolist (window (get-buffer-window-list (current-buffer) nil t))
+        (when (>= (window-point window) end)
+          (push window windows)))
+      windows)))
+
+(defun llemar--follow-output (windows)
+  "Advance WINDOWS to the end of this buffer so they track new output."
+  (let ((end (point-max)))
+    (dolist (window windows)
+      (when (window-live-p window)
+        (set-window-point window end)))))
+
 (defun llemar--handle-record (record &optional raw)
   "Dispatch a protocol RECORD arriving on stdout.
 RAW is the undecoded JSON line the record was parsed from."
-  (if (equal (alist-get 'type record) "response")
-      (llemar--handle-response record)
-    (llemar--handle-event record raw)))
+  (let ((followers (llemar--windows-at-end)))
+    (prog1
+        (if (equal (alist-get 'type record) "response")
+            (llemar--handle-response record)
+          (llemar--handle-event record raw))
+      (llemar--follow-output followers))))
 
 (defun llemar--handle-response (record)
   "Handle a command response RECORD."
