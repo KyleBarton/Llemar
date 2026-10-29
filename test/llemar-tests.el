@@ -379,9 +379,12 @@ They are distinct values on the wire and must not collapse together."
     (let ((buffer (llemar llemar-test-directory)))
       (unwind-protect
           (with-current-buffer buffer
-            (let ((deadline (+ (float-time) 5)))
-              (while (and (llemar--process-live-p) (< (float-time) deadline))
-                (accept-process-output nil 0.05)))
+            ;; Pump until the death note lands rather than until the process
+            ;; stops being live: pi can exit before the first loop check, and
+            ;; then the sentinel only runs once Emacs is given a turn here.
+            (llemar-test--wait
+             (lambda () (string-match-p "# pi process" (buffer-string)))
+             nil 5)
             (should-not (llemar--process-live-p))
             (should-not llemar--busy)
             (should (string-match-p "# pi process" (buffer-string)))
