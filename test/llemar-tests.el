@@ -14,6 +14,7 @@
 
 (require 'ert)
 (require 'org)
+(require 'cl-lib)
 
 (defconst llemar-test-directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -68,6 +69,14 @@ BODY runs inside the conversation buffer, which is killed afterwards."
   (unless (re-search-forward regexp nil t)
     (ert-fail (format "no match for %S in:\n%s" regexp (buffer-string))))
   (goto-char (match-beginning 0)))
+
+(defun llemar-test--wait (predicate &optional process timeout)
+  "Pump PROCESS until PREDICATE returns non-nil or TIMEOUT elapses.
+Return PREDICATE's final value."
+  (let ((deadline (+ (float-time) (or timeout 10))))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output process 0.05))
+    (funcall predicate)))
 
 ;;;; Entry points
 
@@ -402,6 +411,107 @@ They are distinct values on the wire and must not collapse together."
           (llemar--handle-record '((type . "tool_execution_end")
                                    (toolCallId . "x") (toolName . "bash")))
           (should (string-match-p "no output" (buffer-string))))
+      (kill-buffer buffer))))
+
+;;;; Session registry and resume
+
+(ert-deftest llemar-test-records-session-on-start ()
+  "Starting a conversation records its session id and directory."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("basic"))
+         (llemar-session-registry nil)
+         (buffer (llemar llemar-test-directory)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (llemar-test--wait (lambda () llemar--session-id)
+                                     llemar--process))
+          (should (equal llemar--session-id "mock-123"))
+          (let ((entry (assoc "mock-123" llemar-session-registry)))
+            (should entry)
+            (should (equal (plist-get (cdr entry) :cwd)
+                           (file-name-as-directory
+                            (expand-file-name llemar-test-directory))))
+            (should (equal (plist-get (cdr entry) :file)
+                           "/tmp/mock-session.jsonl"))))
+      (kill-buffer buffer))))
+
+(ert-deftest llemar-test-records-first-prompt-label ()
+  "The first prompt sent becomes the session's picker label."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("basic"))
+         (llemar-session-registry nil)
+         (buffer (llemar llemar-test-directory)))
+    (unwind-protect
+        (with-current-buffer buffer
+          ;; The id must be known before the label can be attached to it.
+          (should (llemar-test--wait (lambda () llemar--session-id)
+                                     llemar--process))
+          (goto-char (point-max))
+          (insert "Look around please\n")
+          (llemar-send)
+          (llemar-test--settle)
+          (let ((entry (assoc "mock-123" llemar-session-registry)))
+            (should (equal (plist-get (cdr entry) :label)
+                           "Look around please"))))
+      (kill-buffer buffer))))
+
+(ert-deftest llemar-test-registry-filters-by-directory ()
+  "Listing sessions keeps only the chosen directory, newest first."
+  (let ((llemar-session-registry
+         (list (list "a" :cwd "/dir/one/" :time '(100 0))
+               (list "b" :cwd "/dir/two/" :time '(200 0))
+               (list "c" :cwd "/dir/one/" :time '(300 0)))))
+    (should (equal (mapcar #'car (llemar--registry-sessions "/dir/one/"))
+                   '("c" "a")))
+    (should (equal (mapcar #'car (llemar--registry-sessions "/dir/two/"))
+                   '("b")))
+    (should (equal (mapcar #'car (llemar--registry-sessions))
+                   '("c" "b" "a")))))
+
+(ert-deftest llemar-test-read-session-returns-the-chosen-entry ()
+  "Picking a display label returns its registry entry; empty list errors."
+  (let ((llemar-session-registry
+         (list (list "a" :cwd "/d/" :label "first" :time '(100 0))
+               (list "b" :cwd "/d/" :label "second" :time '(200 0)))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 ;; Newest first, so the first choice is "b".
+                 (car collection))))
+      (should (equal (car (llemar--read-session "/d/")) "b")))
+    (should-error (llemar--read-session "/nowhere/") :type 'user-error)))
+
+(ert-deftest llemar-test-resume-is-a-command ()
+  "`llemar-resume' is interactive."
+  (should (commandp 'llemar-resume)))
+
+(ert-deftest llemar-test-resume-renders-history ()
+  "Resuming replays the saved transcript and leaves a prompt ready."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("resume"))
+         (llemar-session-registry nil)
+         (session (list "s1"
+                        :cwd (file-name-as-directory
+                              (expand-file-name llemar-test-directory))
+                        :file "/tmp/x.jsonl" :label "hi"))
+         (buffer (llemar-resume session)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (llemar-test--wait
+                   (lambda () (save-excursion
+                                (goto-char (point-min))
+                                (re-search-forward "Two files\\." nil t)))
+                   llemar--process))
+          ;; The system message is skipped; each turn is its own heading.
+          (should (equal (llemar-test--headings)
+                         '("User" "Assistant" "bash" "Assistant" "User")))
+          (should (string-match-p "Summarise the repo" (buffer-string)))
+          (should (string-match-p "README.md" (buffer-string)))
+          (should (string-match-p "^:THINKING:$" (buffer-string)))
+          ;; A would-be headline in replayed prose cannot restructure the doc.
+          (should (string-match-p "^ \\* not a heading$" (buffer-string)))
+          (should-not (member "not a heading" (llemar-test--headings)))
+          (should-not llemar--busy)
+          (should (string-match-p "\\* User\n\\'" (buffer-string))))
       (kill-buffer buffer))))
 
 (provide 'llemar-tests)

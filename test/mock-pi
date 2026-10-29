@@ -136,12 +136,43 @@ def scenario_hang():
     emit({"type": "agent_start"})
 
 
+# Saved transcripts returned by `get_messages' when a session is resumed.
+# Each is a list of AgentMessage objects, as pi persists them.
+def messages_resume():
+    return [
+        # A leading system message carries the prompt and tools; a client
+        # rendering history must skip it, not turn it into a turn.
+        {"role": "system", "content": "", "timestamp": 0},
+        {"role": "user", "content": "Summarise the repo", "timestamp": 1},
+        {"role": "assistant",
+         "content": [
+             {"type": "thinking", "thinking": "Let me look around."},
+             {"type": "text", "text": "Here is the summary.\n* not a heading"},
+             {"type": "toolCall", "id": "call_1", "name": "bash",
+              "arguments": {"command": "ls"}}],
+         "model": "mock/model", "usage": {}, "stopReason": "toolUse",
+         "timestamp": 2},
+        {"role": "toolResult", "toolCallId": "call_1", "toolName": "bash",
+         "content": [{"type": "text", "text": "README.md\nllemar.el"}],
+         "isError": False, "timestamp": 3},
+        {"role": "assistant",
+         "content": [{"type": "text", "text": "Two files."}],
+         "model": "mock/model", "usage": {}, "stopReason": "stop",
+         "timestamp": 4},
+    ]
+
+
 SCENARIOS = {
     "basic": scenario_basic,
     "parallel": scenario_parallel,
     "nullargs": scenario_nullargs,
     "retry": scenario_retry,
     "hang": scenario_hang,
+    "resume": scenario_basic,
+}
+
+MESSAGE_SCRIPTS = {
+    "resume": messages_resume,
 }
 
 
@@ -165,7 +196,13 @@ def main():
                   "success": True,
                   "data": {"model": {"id": "mock/model"}, "thinkingLevel": "medium",
                            "isStreaming": False, "messageCount": 2,
-                           "sessionId": "mock-123"}})
+                           "sessionId": "mock-123",
+                           "sessionFile": "/tmp/mock-session.jsonl"}})
+        elif kind == "get_messages":
+            builder = MESSAGE_SCRIPTS.get(scenario)
+            emit({"id": request, "type": "response", "command": "get_messages",
+                  "success": True,
+                  "data": {"messages": builder() if builder else []}})
         elif kind == "set_model":
             emit({"id": request, "type": "response", "command": "set_model",
                   "success": False, "error": "Model not found: bogus"})

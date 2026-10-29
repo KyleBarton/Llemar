@@ -17,6 +17,7 @@
 ;;
 ;;   M-x llemar               start a conversation in the current window
 ;;   M-x llemar-other-window  start one in another window
+;;   M-x llemar-resume        reopen a session Llemar has driven before
 ;;   C-u M-x llemar           prompt for the agent's working directory
 ;;
 ;; In a Llemar buffer, type under the trailing "* User" heading and press
@@ -123,6 +124,109 @@ A window scrolled up to read earlier output is left undisturbed."
 (defvar-local llemar--streamed-blocks nil
   "Hash table of content indices that received streaming deltas.")
 
+(defvar-local llemar--session-id nil
+  "The pi session id this buffer is currently driving, if known.")
+
+;;;; Session registry
+
+(defvar llemar-session-registry nil
+  "Sessions Llemar has driven, available for `llemar-resume'.
+
+An alist keyed by pi session id; each value is a plist with :cwd, :file,
+:name, :label, and :time.  Only sessions Llemar itself started are
+tracked here; sessions created in pi's own interface are not.
+
+Add it to `savehist-additional-variables' to keep it across Emacs
+sessions; Llemar does this automatically once `savehist' is loaded.")
+
+(defvar savehist-additional-variables)
+(with-eval-after-load 'savehist
+  (add-to-list 'savehist-additional-variables 'llemar-session-registry))
+
+(defun llemar--one-line (text max)
+  "Collapse TEXT to a single line and truncate it to MAX characters."
+  (let ((flat (replace-regexp-in-string "[ \t\r\n]+" " " (string-trim text))))
+    (if (> (length flat) max)
+        (concat (substring flat 0 max) "\u2026")
+      flat)))
+
+(defun llemar--registry-put (id &rest props)
+  "Record session ID in `llemar-session-registry', updating it with PROPS.
+PROPS is a plist; a nil value is ignored so a missing field never
+clobbers one already known.  The entry's :time is always refreshed."
+  (when id
+    (let ((entry (assoc id llemar-session-registry)))
+      (unless entry
+        (setq entry (list id))
+        (push entry llemar-session-registry))
+      (let ((plist (cdr entry)))
+        (while props
+          (let ((key (pop props)) (value (pop props)))
+            (when value
+              (setq plist (plist-put plist key value)))))
+        (setcdr entry (plist-put plist :time (current-time))))))
+  id)
+
+(defun llemar--record-session ()
+  "Ask pi for this buffer's session identity and record it.
+
+The session id is not announced in the event stream, so it is read with
+`get_state' whenever the identity is established: at process start and
+after `new_session' or a resume."
+  (when (llemar--process-live-p)
+    (let ((cwd (file-name-as-directory (expand-file-name default-directory))))
+      ;; A send can still race the process dying during startup.
+      (ignore-errors
+        (llemar--send
+         '((type . "get_state"))
+         (lambda (response)
+           (when (alist-get 'success response)
+             (let* ((data (alist-get 'data response))
+                    (id (alist-get 'sessionId data)))
+               (when id
+                 (setq llemar--session-id id)
+                 (llemar--registry-put id
+                                       :cwd cwd
+                                       :file (alist-get 'sessionFile data)
+                                       :name (alist-get 'sessionName data)))))))))))
+
+(defun llemar--registry-sessions (&optional directory)
+  "Return registry entries, most recently active first.
+With DIRECTORY, keep only sessions recorded for it."
+  (let ((dir (and directory
+                  (file-name-as-directory (expand-file-name directory)))))
+    (sort (seq-filter
+           (lambda (entry)
+             (or (null dir)
+                 (equal (plist-get (cdr entry) :cwd) dir)))
+           (copy-sequence llemar-session-registry))
+          (lambda (a b)
+            (time-less-p (or (plist-get (cdr b) :time) 0)
+                         (or (plist-get (cdr a) :time) 0))))))
+
+(defun llemar--session-display (entry)
+  "Return a picker label for registry ENTRY."
+  (let ((plist (cdr entry)))
+    (format "%s  %s"
+            (format-time-string "%Y-%m-%d %H:%M" (or (plist-get plist :time) 0))
+            (or (plist-get plist :name)
+                (plist-get plist :label)
+                (car entry)))))
+
+(defun llemar--read-session (&optional directory)
+  "Read a recorded session to resume, limited to DIRECTORY when non-nil.
+Return the chosen registry entry, or signal a `user-error' if none exist."
+  (let* ((sessions (llemar--registry-sessions directory))
+         (choices (mapcar (lambda (entry)
+                            (cons (llemar--session-display entry) entry))
+                          sessions)))
+    (unless choices
+      (user-error "No Llemar sessions recorded%s"
+                  (if directory (format " for %s" directory) "")))
+    (cdr (assoc (completing-read "Resume session: "
+                                 (mapcar #'car choices) nil t)
+                choices))))
+
 ;;;; Process management
 
 (defun llemar-default-buffer-name (directory)
@@ -139,8 +243,10 @@ A window scrolled up to read earlier output is left undisturbed."
   (with-current-buffer (or buffer (current-buffer))
     (and llemar--process (process-live-p llemar--process))))
 
-(defun llemar--start-process ()
-  "Start a pi RPC process for the current buffer."
+(defun llemar--start-process (&optional session)
+  "Start a pi RPC process for the current buffer.
+When SESSION is non-nil, pass it to pi as the `--session' argument to
+resume that session file or id."
   (when (llemar--process-live-p)
     (user-error "This buffer already has a running pi process"))
   (unless (executable-find llemar-executable)
@@ -148,7 +254,9 @@ A window scrolled up to read earlier output is left undisturbed."
                 llemar-executable))
   (let* ((conversation (current-buffer))
          (log (get-buffer-create (llemar--log-buffer-name conversation)))
-         (args (append (list "--mode" "rpc") llemar-extra-args))
+         (args (append (list "--mode" "rpc")
+                       (when session (list "--session" session))
+                       llemar-extra-args))
          (process
           (make-process
            :name (format "llemar-pi: %s" (buffer-name conversation))
@@ -164,6 +272,7 @@ A window scrolled up to read earlier output is left undisturbed."
     (process-put process 'llemar-pending "")
     (setq llemar--process process)
     (llemar--set-status nil)
+    (llemar--record-session)
     process))
 
 (defun llemar--process-sentinel (process event)
@@ -513,6 +622,8 @@ RAW is the JSON line RECORD was parsed from."
                           (alist-get 'event record)
                           (alist-get 'error record))))
     ("session_info_changed"
+     (when llemar--session-id
+       (llemar--registry-put llemar--session-id :name (alist-get 'name record)))
      (llemar--set-status llemar--status))
     (_ nil)))
 
@@ -606,6 +717,95 @@ exactly as the agent sent them."
                  (alist-get 'content result)))
    "\n"))
 
+;;;; Session replay
+
+(defun llemar--message-text (content)
+  "Return the concatenated text of message CONTENT.
+CONTENT is either a string or a list of content blocks."
+  (cond
+   ((stringp content) content)
+   ((listp content)
+    (string-join
+     (delq nil (mapcar (lambda (block)
+                         (when (equal (alist-get 'type block) "text")
+                           (alist-get 'text block)))
+                       content))
+     ""))
+   (t "")))
+
+(defun llemar--replay-thinking (marker text)
+  "Render a saved thinking block holding TEXT at MARKER."
+  (when (and llemar-show-thinking text (not (string-empty-p text)))
+    (llemar--insert-newline marker)
+    (save-excursion (goto-char marker) (insert ":THINKING:\n"))
+    (llemar--insert marker text)
+    (llemar--insert-newline marker)
+    (save-excursion (goto-char marker) (insert ":END:\n"))
+    (when llemar-fold-thinking
+      (save-excursion
+        (goto-char marker)
+        (when (re-search-backward "^[ \t]*:THINKING:[ \t]*$" nil t)
+          (llemar--fold (point) 'drawer))))))
+
+(defun llemar--replay-message (message)
+  "Render one saved MESSAGE, an AgentMessage, into this buffer.
+
+Only the roles that carry a transcript turn are rendered; system
+messages and other context-only roles are skipped so they do not become
+headings."
+  (pcase (alist-get 'role message)
+    ("user"
+     (let ((marker (llemar--marker)))
+       (llemar--insert-heading marker 1 llemar-user-heading)
+       (llemar--insert marker
+                       (string-trim-right
+                        (llemar--message-text (alist-get 'content message))))))
+    ("assistant"
+     (llemar--open-assistant)
+     (let ((marker (llemar--marker)))
+       (dolist (block (alist-get 'content message))
+         (pcase (alist-get 'type block)
+           ("text" (llemar--insert marker (alist-get 'text block)))
+           ("thinking"
+            (llemar--replay-thinking marker (alist-get 'thinking block)))
+           ("toolCall"
+            (let ((id (alist-get 'id block))
+                  (name (alist-get 'name block))
+                  (args (alist-get 'arguments block)))
+              (llemar--tool-marker id name)
+              (when-let* ((pretty (and args (llemar--json-pretty args))))
+                (llemar--insert-block (llemar--tool-marker id name)
+                                      "#+begin_src json" pretty
+                                      "#+end_src"))))))))
+    ("toolResult"
+     ;; Reuse the live result renderer by shaping a matching record; a
+     ;; saved message carries no duration, so none is shown.
+     (llemar--render-tool-result
+      `((toolCallId . ,(alist-get 'toolCallId message))
+        (toolName . ,(alist-get 'toolName message))
+        (isError . ,(alist-get 'isError message))
+        (result . ((content . ,(alist-get 'content message)))))))
+    (_ nil)))
+
+(defun llemar--replay-messages (messages)
+  "Render saved MESSAGES into this buffer in order."
+  (dolist (message messages)
+    (llemar--replay-message message)))
+
+(defun llemar--load-session ()
+  "Fetch the resumed session's messages from pi and render them.
+A fresh user prompt is left at the end, ready to continue the session."
+  (llemar--send
+   '((type . "get_messages"))
+   (lambda (response)
+     (when (alist-get 'success response)
+       (llemar--release-tool-markers)
+       (clrhash llemar--streamed-blocks)
+       (llemar--replay-messages
+        (alist-get 'messages (alist-get 'data response)))
+       (llemar--open-user-prompt)
+       (llemar--set-status nil)))))
+
 ;;;; Prompt handling
 
 (defun llemar--user-heading-regexp ()
@@ -680,11 +880,57 @@ folder.  See `llemar\=' to take over the current window instead."
     (pop-to-buffer buffer)
     buffer))
 
-(defun llemar--insert-preamble ()
-  "Insert the org preamble and an empty user prompt into this buffer."
+(defun llemar--resume-conversation (directory ref)
+  "Create a buffer for DIRECTORY and start pi resuming session REF.
+REF is a session file path or id passed to pi via `--session'.  The
+buffer is returned without being displayed."
+  (let* ((directory (file-name-as-directory
+                     (expand-file-name (or directory default-directory))))
+         (buffer (generate-new-buffer
+                  (funcall llemar-buffer-name-function directory))))
+    (condition-case err
+        (with-current-buffer buffer
+          (setq default-directory directory)
+          (llemar-mode)
+          (llemar--insert-preamble t)
+          (llemar--start-process ref)
+          (llemar--load-session)
+          (goto-char (point-max)))
+      (error (kill-buffer buffer)
+             (signal (car err) (cdr err))))
+    buffer))
+
+;;;###autoload
+(defun llemar-resume (session)
+  "Resume a recorded pi SESSION in a new conversation buffer.
+
+Interactively, choose from the sessions Llemar has driven for the
+current directory; with a prefix argument, choose from every recorded
+session.  The new buffer opens in the session's working directory and
+its saved history is loaded and rendered, with a fresh prompt ready to
+continue.
+
+Only sessions Llemar itself started are offered; sessions created in
+pi's own interface are not tracked."
+  (interactive
+   (list (llemar--read-session
+          (unless current-prefix-arg
+            (file-name-as-directory (expand-file-name default-directory))))))
+  (let* ((plist (cdr session))
+         (directory (or (plist-get plist :cwd) default-directory))
+         (ref (or (plist-get plist :file) (car session)))
+         (buffer (llemar--resume-conversation directory ref)))
+    (pop-to-buffer-same-window buffer)
+    buffer))
+
+(defun llemar--insert-preamble (&optional no-prompt)
+  "Insert the org preamble into this buffer.
+Unless NO-PROMPT is non-nil, also add an empty trailing user heading.
+Resuming suppresses it, then adds one after the history is rendered."
   (insert (format "#+title: llemar %s\n#+startup: hideblocks\n\n"
                   (format-time-string "%Y-%m-%d %H:%M")))
-  (insert "* " llemar-user-heading "\n"))
+  (unless no-prompt
+    (insert "* " llemar-user-heading "\n")))
 
 (defun llemar-send ()
   "Send the prompt under the last user heading to the agent."
@@ -698,6 +944,13 @@ folder.  See `llemar\=' to take over the current window instead."
                              (car bounds) (cdr bounds)))))
     (when (string-empty-p text)
       (user-error "The prompt is empty"))
+    ;; The first prompt of a session becomes its picker label.
+    (when (and llemar--session-id
+               (not (plist-get (cdr (assoc llemar--session-id
+                                           llemar-session-registry))
+                               :label)))
+      (llemar--registry-put llemar--session-id
+                            :label (llemar--one-line text 72)))
     (set-marker (llemar--marker) (point-max))
     (llemar--release-tool-markers)
     (clrhash llemar--streamed-blocks)
@@ -743,7 +996,9 @@ folder.  See `llemar\=' to take over the current window instead."
            (set-marker (llemar--marker) (point-max))
            (llemar--insert-preamble)
            (goto-char (point-max))
-           (llemar--set-status nil)))))))
+           (setq llemar--session-id nil)
+           (llemar--set-status nil)
+           (llemar--record-session)))))))
 
 (defun llemar-restart ()
   "Restart the pi process for this buffer."
