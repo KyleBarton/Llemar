@@ -975,8 +975,10 @@ Resuming suppresses it, then adds one after the history is rendered."
     (user-error "Nothing to steer with"))
   (llemar--send `((type . "steer") (message . ,message)))
   (let ((marker (llemar--marker)))
-    (llemar--insert-heading marker 2 "Steering")
-    (llemar--insert marker (concat message "\n"))))
+    (llemar--insert-newline marker)
+    (save-excursion (goto-char marker) (insert ":STEERING:\n"))
+    (llemar--insert marker (concat message "\n"))
+    (save-excursion (goto-char marker) (insert ":END:\n"))))
 
 (defun llemar-new-session ()
   "Start a fresh pi session, clearing the conversation buffer."

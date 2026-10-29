@@ -268,6 +268,19 @@ for an already-streamed block."
   (llemar-test-with-conversation "basic" "go"
     (should (string-match-p "Two files\\. Done\\." (buffer-string)))))
 
+(ert-deftest llemar-test-steering-is-not-a-heading ()
+  "A steering message renders as a drawer, not a headline.
+As a headline it would break the nesting of the `* Assistant' turn it
+interrupts."
+  (llemar-test-with-conversation "basic" "go"
+    (llemar-steer "please focus")
+    (should-not (member "Steering" (llemar-test--headings)))
+    (should (equal (llemar-test--headings)
+                   '("User" "Assistant" "bash" "Assistant" "User")))
+    (llemar-test--goto "^:STEERING:$")
+    (llemar-test--goto "please focus")
+    (should (org-element-parse-buffer))))
+
 (ert-deftest llemar-test-fresh-user-heading-on-settle ()
   "Settling leaves an empty user heading ready to type into."
   (llemar-test-with-conversation "basic" "go"
