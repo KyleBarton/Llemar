@@ -54,6 +54,19 @@ emacs -Q --batch -l test/llemar-tests.el \
 Run `./test/run-tests.sh` before calling a change done; byte-compile warnings
 and checkdoc issues fail it just like a failing test.
 
+## Dogfooding
+
+“Dogfooding” means reloading `llemar.el` into the running Emacs daemon via
+`emacsclient` to try changes live.  Do this on request or when appropriate
+(for example, after a tested follow-up to an already-loaded change), not
+automatically after every change.  It does not replace the test suite.
+
+From the repository root:
+
+```bash
+emacsclient --eval "(load-file \"$(pwd)/llemar.el\")"
+```
+
 ## Style
 
 <!-- Add style preferences here as they come up. -->
