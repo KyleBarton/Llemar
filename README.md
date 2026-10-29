@@ -17,8 +17,8 @@ Llemar speaks pi's [RPC protocol](https://github.com/earendil-works/pi/tree/main
 newline-delimited JSON commands on stdin, responses and session events on
 stdout. One pi process per conversation buffer.
 
-`llm_backend/` and `chatgpt_mode.el` are the earlier hand-rolled backend and
-front end. They are superseded by this and kept only for reference.
+`llm_backend/` is the earlier hand-rolled backend. It is superseded by pi and
+kept only for reference.
 
 ## Requirements
 
