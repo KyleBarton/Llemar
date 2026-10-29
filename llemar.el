@@ -534,7 +534,7 @@ exactly as the agent sent them."
        (let* ((call (alist-get 'toolCall event))
               (id (alist-get 'id call))
               (args (llemar--display-arguments call raw)))
-         (when-let ((pretty (and args
+         (when-let* ((pretty (and args
                                  (not (eq args :null))
                                  (not (eq args :false))
                                  (llemar--json-pretty args))))
@@ -776,7 +776,7 @@ Otherwise a log buffer outlives every conversation that ever ran."
   (when (llemar--process-live-p)
     (process-send-eof llemar--process)
     (delete-process llemar--process))
-  (when-let ((log (get-buffer (llemar--log-buffer-name (current-buffer)))))
+  (when-let* ((log (get-buffer (llemar--log-buffer-name (current-buffer)))))
     (kill-buffer log)))
 
 (provide 'llemar)
