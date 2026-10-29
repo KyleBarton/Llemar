@@ -468,8 +468,60 @@ They are distinct values on the wire and must not collapse together."
           (llemar-test--settle)
           (let ((entry (assoc "mock-123" llemar-session-registry)))
             (should (equal (plist-get (cdr entry) :label)
-                           "Look around please"))))
+                           "Look around please")))
+          (should (equal (buffer-name) "*llemar: look-around-please*")))
       (kill-buffer buffer))))
+
+(ert-deftest llemar-test-session-label-renames-buffer-and-log ()
+  "Session labels are slugified, with unique names and log continuity."
+  (let* ((llemar-session-registry nil)
+         (occupied (generate-new-buffer "*llemar: fix-the-bug*"))
+         (buffer (generate-new-buffer " *llemar-rename-test*"))
+         (log (get-buffer-create (llemar--log-buffer-name buffer))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (llemar-mode)
+          (setq llemar--session-id "rename-test")
+          (llemar--registry-put "rename-test" :label "  Fix THE / bug!!!  ")
+          (should (equal (buffer-name) "*llemar: fix-the-bug*<2>"))
+          (should (eq log (get-buffer (llemar--log-buffer-name buffer))))
+          ;; An explicit session name takes precedence over the prompt label.
+          (llemar--registry-put "rename-test" :name "Better Name")
+          (should (equal (buffer-name) "*llemar: better-name*"))
+          ;; Unrelated updates must not rename this conversation.
+          (llemar--registry-put "other" :label "Other session")
+          (should (equal (buffer-name) "*llemar: better-name*")))
+      (kill-buffer buffer)
+      (when (buffer-live-p log) (kill-buffer log))
+      (kill-buffer occupied))))
+
+(ert-deftest llemar-test-session-slug-is-shorter-than-label ()
+  "Buffer slugs are capped at 36 characters without a trailing hyphen."
+  (let ((llemar-session-registry nil))
+    (with-temp-buffer
+      (llemar-mode)
+      (setq llemar--session-id "long-slug")
+      (let ((label (concat (make-string 35 ?a) " more words for the label")))
+        (llemar--registry-put "long-slug" :label label)
+        (should (equal (buffer-name)
+                       (format "*llemar: %s*" (make-string 35 ?a))))
+        (should (equal (plist-get (cdr (assoc "long-slug"
+                                            llemar-session-registry))
+                                 :label)
+                       label)))
+      (llemar--registry-put "long-slug" :name (make-string 60 ?b))
+      (should (equal (buffer-name)
+                     (format "*llemar: %s*" (make-string 36 ?b)))))))
+
+(ert-deftest llemar-test-empty-session-slug-keeps-buffer-name ()
+  "A label containing only punctuation does not produce an empty name."
+  (let ((llemar-session-registry nil))
+    (with-temp-buffer
+      (llemar-mode)
+      (setq llemar--session-id "empty-slug")
+      (let ((name (buffer-name)))
+        (llemar--registry-put "empty-slug" :label "?!")
+        (should (equal (buffer-name) name))))))
 
 (ert-deftest llemar-test-registry-filters-by-directory ()
   "Listing sessions keeps only the chosen directory, newest first."

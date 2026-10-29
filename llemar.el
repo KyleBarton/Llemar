@@ -150,10 +150,31 @@ sessions; Llemar does this automatically once `savehist' is loaded.")
         (concat (substring flat 0 max) "\u2026")
       flat)))
 
+(defun llemar--rename-session-buffer (name)
+  "Rename the current conversation and its log using a slug of NAME.
+Limit the slug to 36 characters, trimming trailing hyphens.
+Leave the buffer names unchanged when NAME has no letters or digits."
+  (when name
+    (let* ((slug (string-trim
+                  (replace-regexp-in-string
+                   "[^[:alnum:]]+" "-" (downcase name))
+                  "-+" "-+"))
+           (slug (string-trim-right
+                  (substring slug 0 (min 36 (length slug))) "-+"))
+           (target (format "*llemar: %s*" slug)))
+      (unless (or (string-empty-p slug) (equal (buffer-name) target))
+        (let ((log (get-buffer (llemar--log-buffer-name (current-buffer)))))
+          (rename-buffer target t)
+          (when log
+            (let ((log-name (llemar--log-buffer-name (current-buffer))))
+              (with-current-buffer log
+                (rename-buffer log-name t)))))))))
+
 (defun llemar--registry-put (id &rest props)
   "Record session ID in `llemar-session-registry', updating it with PROPS.
 PROPS is a plist; a nil value is ignored so a missing field never
-clobbers one already known.  The entry's :time is always refreshed."
+clobbers one already known.  The entry's :time is always refreshed.
+For the current session, rename the buffer using its name or label."
   (when id
     (let ((entry (assoc id llemar-session-registry)))
       (unless entry
@@ -164,7 +185,10 @@ clobbers one already known.  The entry's :time is always refreshed."
           (let ((key (pop props)) (value (pop props)))
             (when value
               (setq plist (plist-put plist key value)))))
-        (setcdr entry (plist-put plist :time (current-time))))))
+        (setcdr entry (plist-put plist :time (current-time)))
+        (when (equal id llemar--session-id)
+          (llemar--rename-session-buffer
+           (or (plist-get plist :name) (plist-get plist :label)))))))
   id)
 
 (defun llemar--record-session ()
