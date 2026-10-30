@@ -59,6 +59,11 @@ kept only for reference.
 current window. `M-x llemar-other-window` displays it in another window
 instead. A `C-u` prefix on either prompts for the agent's working directory.
 
+When called from an existing Llemar buffer, `M-x llemar` saves its transcript
+and closes that buffer and its pi process after the new conversation starts
+successfully. Use `M-x llemar-other-window` to keep the existing conversation
+open. If starting the new conversation fails, the existing one is left intact.
+
 Type your prompt under the trailing `* User` heading and press `C-c C-c`. The
 reply streams in below it, and a fresh `* User` heading appears when the agent
 settles.
@@ -137,6 +142,9 @@ directory; `C-u M-x llemar-resume` offers sessions across directories. Selecting
 one starts a pi process attached to that session, renders its saved history,
 and leaves a fresh prompt ready to continue. Historical file-display requests
 are passive: resuming does not reopen those files.
+
+Resuming from an existing Llemar buffer likewise saves and closes the current
+conversation after the resumed conversation starts successfully.
 
 Only sessions driven through Llemar are offered, not sessions started in pi's
 own interface. Enable `savehist-mode` to preserve Llemar's session registry

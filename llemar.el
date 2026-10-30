@@ -1086,9 +1086,14 @@ without being displayed."
 (defun llemar (&optional directory)
   "Start a conversation with a pi agent in the current window.
 With a prefix argument, prompt for DIRECTORY as the agent's working
-folder.  See `llemar-other-window\=' to display it elsewhere instead."
+folder.  When called from a Llemar buffer, save its transcript and kill
+that buffer after the new conversation starts successfully.  See
+`llemar-other-window\=' to keep it and display a new conversation elsewhere."
   (interactive (list (llemar--read-directory)))
-  (let ((buffer (llemar--new-conversation directory)))
+  (let ((previous (when (derived-mode-p 'llemar-mode) (current-buffer)))
+        (buffer (llemar--new-conversation directory)))
+    (when previous
+      (kill-buffer previous))
     (pop-to-buffer-same-window buffer)
     buffer))
 
@@ -1130,7 +1135,8 @@ Interactively, choose from the sessions Llemar has driven for the
 current directory; with a prefix argument, choose from every recorded
 session.  The new buffer opens in the session's working directory and
 its saved history is loaded and rendered, with a fresh prompt ready to
-continue.
+continue.  When called from a Llemar buffer, save its transcript and
+kill that buffer after the resumed conversation starts successfully.
 
 Only sessions Llemar itself started are offered; sessions created in
 pi's own interface are not tracked."
@@ -1138,10 +1144,13 @@ pi's own interface are not tracked."
    (list (llemar--read-session
           (unless current-prefix-arg
             (file-name-as-directory (expand-file-name default-directory))))))
-  (let* ((plist (cdr session))
+  (let* ((previous (when (derived-mode-p 'llemar-mode) (current-buffer)))
+         (plist (cdr session))
          (directory (or (plist-get plist :cwd) default-directory))
          (ref (or (plist-get plist :file) (car session)))
          (buffer (llemar--resume-conversation directory ref)))
+    (when previous
+      (kill-buffer previous))
     (pop-to-buffer-same-window buffer)
     buffer))
 

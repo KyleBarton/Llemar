@@ -108,6 +108,7 @@ Return PREDICATE's final value."
       (should (eq (selected-window) start))
       (should (eq (window-buffer start) conversation))
       (should (= 1 (length (window-list))))
+      (should (buffer-live-p scratch))
       (should (equal (expand-file-name
                       (with-current-buffer conversation default-directory))
                      (expand-file-name llemar-test-directory))))))
@@ -120,6 +121,60 @@ Return PREDICATE's final value."
       (should (eq (window-buffer start) scratch))
       (should-not (eq (selected-window) start))
       (should (eq (window-buffer (selected-window)) conversation)))))
+
+(ert-deftest llemar-test-start-replaces-current-conversation ()
+  "Starting from a conversation saves it and cleans up its buffer and pi."
+  (llemar-test-with-window-setup
+    (let ((llemar-session-registry nil))
+      (setq conversation (llemar llemar-test-directory))
+      (should (llemar-test--wait (lambda () llemar--session-id)
+                                llemar--process))
+      (insert "Unsent draft to preserve\n")
+      (let ((old conversation)
+            (process llemar--process)
+            (log (get-buffer (llemar--log-buffer-name conversation)))
+            (file (expand-file-name (concat (secure-hash 'sha256 llemar--session-id)
+                                            ".org")
+                                    llemar-session-directory))
+            (start (selected-window)))
+        (setq conversation (llemar))
+        (should-not (eq conversation old))
+        (should-not (buffer-live-p old))
+        (should-not (process-live-p process))
+        (should-not (buffer-live-p log))
+        (should (eq (selected-window) start))
+        (should (eq (window-buffer start) conversation))
+        (should (equal default-directory
+                       (file-name-as-directory llemar-test-directory)))
+        (should (with-temp-buffer
+                  (insert-file-contents file)
+                  (search-forward "Unsent draft to preserve" nil t)))))))
+
+(ert-deftest llemar-test-start-failure-preserves-current-conversation ()
+  "A failed replacement leaves the old conversation and process alive."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (let ((process llemar--process)
+          (llemar-executable "llemar-definitely-not-installed"))
+      (should-error (llemar) :type 'user-error)
+      (should (buffer-live-p conversation))
+      (should (process-live-p process))
+      (should (eq (window-buffer) conversation)))))
+
+(ert-deftest llemar-test-other-window-preserves-current-conversation ()
+  "Starting in another window keeps the original conversation alive."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (let ((old conversation)
+          (start (selected-window)))
+      (unwind-protect
+          (progn
+            (setq conversation (llemar-other-window))
+            (should (buffer-live-p old))
+            (should (llemar--process-live-p old))
+            (should (eq (window-buffer start) old))
+            (should-not (eq conversation old)))
+        (when (buffer-live-p old) (kill-buffer old))))))
 
 ;;;; Following streaming output
 
@@ -629,6 +684,46 @@ They are distinct values on the wire and must not collapse together."
 (ert-deftest llemar-test-resume-is-a-command ()
   "`llemar-resume' is interactive."
   (should (commandp 'llemar-resume)))
+
+(ert-deftest llemar-test-resume-replaces-current-conversation ()
+  "Resuming saves and cleans up the current conversation."
+  (llemar-test-with-window-setup
+    (let ((llemar-session-registry nil))
+      (setq conversation (llemar llemar-test-directory))
+      (should (llemar-test--wait (lambda () llemar--session-id)
+                                llemar--process))
+      (insert "Draft before resuming\n")
+      (let ((old conversation)
+            (process llemar--process)
+            (log (get-buffer (llemar--log-buffer-name conversation)))
+            (file (expand-file-name
+                   (concat (secure-hash 'sha256 llemar--session-id) ".org")
+                   llemar-session-directory))
+            (start (selected-window))
+            (llemar-extra-args '("resume")))
+        (setq conversation
+              (llemar-resume (list "s1" :cwd llemar-test-directory
+                                   :file "/tmp/x.jsonl")))
+        (should-not (buffer-live-p old))
+        (should-not (process-live-p process))
+        (should-not (buffer-live-p log))
+        (should (eq (selected-window) start))
+        (should (eq (window-buffer start) conversation))
+        (should (with-temp-buffer
+                  (insert-file-contents file)
+                  (search-forward "Draft before resuming" nil t)))))))
+
+(ert-deftest llemar-test-resume-failure-preserves-current-conversation ()
+  "A failed resume leaves the current conversation and process alive."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (let ((process llemar--process)
+          (llemar-executable "llemar-definitely-not-installed"))
+      (should-error (llemar-resume (list "s1" :cwd llemar-test-directory))
+                    :type 'user-error)
+      (should (buffer-live-p conversation))
+      (should (process-live-p process))
+      (should (eq (window-buffer) conversation)))))
 
 (ert-deftest llemar-test-resume-renders-history ()
   "Resuming replays the saved transcript and leaves a prompt ready."
