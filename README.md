@@ -88,13 +88,29 @@ applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
 
+## Showing files from the agent
+
+Llemar explicitly loads its companion pi extension, which gives the agent an
+`open_buffer` tool. Ask, for example, “show me the function that handles this.”
+Pi validates the file and returns a structured display request; Llemar opens
+it in another window without stealing focus. Optional line and character
+column positions are 1-based. Only existing local files within the
+conversation's launch directory are allowed, including after resolving symlinks.
+
+This is a best-effort UI action: pi knows the file was validated, but does not
+receive confirmation of display. Editor-side failures appear in a folded
+`:LLEMAR_ERROR:` drawer beneath the tool call (expand with `TAB`), and in the
+log. Historical tool results do not reopen files when resuming a session.
+The companion files in `pi-extensions/` must remain beside `llemar.el`.
+
 ## Tests
 
 ```bash
 ./test/run-tests.sh
 ```
 
-Byte-compiles with warnings as errors, runs checkdoc, then runs the ERT suite.
+Byte-compiles with warnings as errors, runs checkdoc, offline companion-tool
+unit tests (requires Node.js with `node --test`), then the ERT suite.
 The tests drive `test/mock-pi`, a stand-in that speaks pi's RPC protocol and
 replays named event scripts, so the suite needs no model, no network, and costs
 nothing. Scenarios cover streaming and non-streaming turns, parallel tool calls

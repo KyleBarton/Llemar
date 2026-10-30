@@ -8,6 +8,7 @@ asserted without a model, a network call, or any cost.
 Usage: mock-pi [--mode rpc] <scenario>
 """
 import json
+import os
 import sys
 
 
@@ -162,7 +163,25 @@ def messages_resume():
     ]
 
 
+def scenario_open_buffer():
+    begin()
+    path = os.path.join(os.getcwd(), "mock-pi")
+    for call_id, line in [("open-ok", 2), ("open-error", 999999)]:
+        emit({"type": "tool_execution_start", "toolCallId": call_id,
+              "toolName": "open_buffer", "args": {"path": path}})
+        event = {"type": "tool_execution_end", "toolCallId": call_id,
+                 "toolName": "open_buffer", "isError": False,
+                 "result": {"content": [{"type": "text", "text": "Display requested."}],
+                            "details": {"version": 1, "action": "open_file",
+                                        "path": path, "line": line}}}
+        emit(event)
+        emit(event)  # Duplicate delivery must not repeat the editor action.
+    end_message()
+    settle()
+
+
 SCENARIOS = {
+    "open-buffer": scenario_open_buffer,
     "basic": scenario_basic,
     "parallel": scenario_parallel,
     "nullargs": scenario_nullargs,

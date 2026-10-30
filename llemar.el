@@ -100,6 +100,23 @@ A window scrolled up to read earlier output is left undisturbed."
 
 ;;;; Buffer-local state
 
+(defconst llemar--extension-file
+  (expand-file-name "pi-extensions/llemar.ts"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Absolute path to Llemar's companion pi extension.")
+
+(defvar-local llemar--display-root nil
+  "Canonical launch root allowed for editor display requests.")
+
+(defvar-local llemar--display-seen nil
+  "Tool call IDs already consumed in this process generation.")
+
+(defvar-local llemar--display-queue nil
+  "Pending editor actions in completion order.")
+
+(defvar-local llemar--display-timer nil
+  "Timer draining pending editor actions outside the process filter.")
+
 (defvar-local llemar--process nil
   "The pi RPC process serving this buffer.")
 
@@ -276,9 +293,13 @@ resume that session file or id."
   (unless (executable-find llemar-executable)
     (user-error "Cannot find `%s'.  Install pi from https://pi.dev"
                 llemar-executable))
+  (llemar--cancel-displays)
+  (setq llemar--display-root (file-name-as-directory (file-truename default-directory)))
   (let* ((conversation (current-buffer))
+         (process-environment (copy-sequence process-environment))
+         (_ (setenv "LLEMAR_ROOT" llemar--display-root))
          (log (get-buffer-create (llemar--log-buffer-name conversation)))
-         (args (append (list "--mode" "rpc")
+         (args (append (list "--mode" "rpc" "--extension" llemar--extension-file)
                        (when session (list "--session" session))
                        llemar-extra-args))
          (process
@@ -304,7 +325,8 @@ resume that session file or id."
   (let ((conversation (process-get process 'llemar-conversation)))
     (when (buffer-live-p conversation)
       (with-current-buffer conversation
-        (unless (process-live-p process)
+        (when (and (eq process llemar--process) (not (process-live-p process)))
+          (llemar--cancel-displays)
           (setq llemar--busy nil)
           (llemar--set-status "dead")
           (llemar--note (format "pi process %s" (string-trim event))))))))
@@ -322,7 +344,8 @@ be treated as record boundaries."
          (complete (butlast lines))
          (conversation (process-get process 'llemar-conversation)))
     (process-put process 'llemar-pending leftover)
-    (when (buffer-live-p conversation)
+    (when (and (buffer-live-p conversation)
+               (eq process (buffer-local-value 'llemar--process conversation)))
       (dolist (line complete)
         (let ((line (string-remove-suffix "\r" line)))
           (unless (string-empty-p (string-trim line))
@@ -543,6 +566,116 @@ the shared insertion marker so the two cannot be confused."
   (maphash (lambda (_id marker) (set-marker marker nil)) llemar--tool-markers)
   (clrhash llemar--tool-markers))
 
+;;;; Editor display requests
+
+(defun llemar--cancel-displays ()
+  "Discard pending display actions and consumed tool IDs."
+  (when (timerp llemar--display-timer)
+    (cancel-timer llemar--display-timer))
+  (dolist (item llemar--display-queue) (set-marker (nth 1 item) nil))
+  (setq llemar--display-timer nil
+        llemar--display-queue nil
+        llemar--display-seen (make-hash-table :test #'equal)))
+
+(defun llemar--editor-error (marker text)
+  "Record editor failure TEXT in a drawer at tool MARKER and in the log."
+  (let* ((inhibit-read-only t)
+         (safe (replace-regexp-in-string "[\n\r]+" " " (truncate-string-to-width text 1000)))
+         (start (marker-position marker)))
+    (save-excursion
+      (goto-char marker)
+      (insert ":LLEMAR_ERROR:\n")
+      ;; A leading space prevents even hostile error text becoming Org syntax.
+      (insert " " safe "\n:END:\n"))
+    (llemar--fold start 'drawer)
+    (llemar--log (current-buffer) (concat "editor error: " safe))
+    (message "llemar: %s" safe)))
+
+(defun llemar--queue-display (record)
+  "Queue a live successful display RECORD exactly once."
+  (let ((id (alist-get 'toolCallId record)))
+    (when (and (stringp id) (llemar--process-live-p)
+               (not (gethash id llemar--display-seen)))
+      (puthash id t llemar--display-seen)
+      (setq llemar--display-queue
+            (nconc llemar--display-queue
+                   (list (list (alist-get 'details (alist-get 'result record))
+                               (copy-marker (llemar--tool-marker id) t)))))
+      (unless llemar--display-timer
+        (setq llemar--display-timer
+              (run-at-time 0 nil #'llemar--drain-displays
+                           (current-buffer) llemar--process))))))
+
+(defun llemar--drain-displays (conversation process)
+  "Run queued actions for CONVERSATION if PROCESS is still current."
+  (when (buffer-live-p conversation)
+    (with-current-buffer conversation
+      (when (and (eq process llemar--process) (process-live-p process))
+        (setq llemar--display-timer nil)
+        (while llemar--display-queue
+          (let* ((item (pop llemar--display-queue)) (marker (nth 1 item)))
+            (unwind-protect
+                (condition-case err
+                    (llemar--display-file (car item))
+                  (error (llemar--editor-error marker (error-message-string err))))
+              (set-marker marker nil))))))))
+
+(defun llemar--display-file (details)
+  "Validate display DETAILS and show the file without selecting its window."
+  (let* ((path (alist-get 'path details))
+         (line (alist-get 'line details))
+         (column (alist-get 'column details))
+         (conversation (current-buffer))
+         (origin (or (and (eq (window-buffer (selected-window)) conversation)
+                          (selected-window))
+                     (get-buffer-window conversation t))))
+    (unless (and (equal (alist-get 'version details) 1)
+                 (equal (alist-get 'action details) "open_file")
+                 (stringp path) (not (string-empty-p path))
+                 (not (file-remote-p path)) (file-name-absolute-p path)
+                 (or (null line) (and (integerp line) (> line 0)))
+                 (or (null column) (and line (integerp column) (> column 0))))
+      (error "Invalid open_buffer display details"))
+    (setq path (file-truename path))
+    (unless (and llemar--display-root
+                 (file-in-directory-p path llemar--display-root)
+                 (file-regular-p path))
+      (error "Display target must be an existing file within the launch root"))
+    (unless (window-live-p origin) (error "Conversation is not visible"))
+    (let* ((target (find-file-noselect path))
+           (position
+            (with-current-buffer target
+              (save-restriction
+                (widen)
+                (save-excursion
+                  (when line
+                    (goto-char (point-min))
+                    (unless (zerop (forward-line (1- line)))
+                      (error "Requested line is out of range"))
+                    (when column
+                      (unless (<= (1- column) (- (line-end-position) (point)))
+                        (error "Requested column is out of range"))
+                      (forward-char (1- column))))
+                  (point))))))
+      (when (eq target conversation) (error "Cannot display the conversation itself"))
+      (save-selected-window
+        (with-selected-window origin
+          (let ((window
+                 (or (seq-find
+                      (lambda (w)
+                        (and (not (window-dedicated-p w))
+                             (not (with-current-buffer (window-buffer w)
+                                    (derived-mode-p 'llemar-mode)))
+                             (not (minibufferp (window-buffer w)))))
+                      (window-list (window-frame origin) 'no-minibuffer))
+                     (split-window origin))))
+            (unless (window-live-p window) (error "No suitable display window"))
+            (set-window-buffer window target)
+            (when line
+              (with-current-buffer target (widen))
+              (set-window-point window position)
+              (with-selected-window window (goto-char position) (recenter)))))))))
+
 ;;;; Record dispatch
 
 (defun llemar--windows-at-end ()
@@ -609,6 +742,9 @@ RAW is the JSON line RECORD was parsed from."
      (llemar--set-status (format "%s" (alist-get 'toolName record))))
     ("tool_execution_end"
      (llemar--render-tool-result record)
+     (when (and (equal (alist-get 'toolName record) "open_buffer")
+                (not (alist-get 'isError record)))
+       (llemar--queue-display record))
      (llemar--set-status "thinking"))
     ("agent_settled"
      (setq llemar--busy nil)
@@ -1015,6 +1151,7 @@ Resuming suppresses it, then adds one after the history is rendered."
        (if (alist-get 'cancelled (alist-get 'data response))
            (message "llemar: new session cancelled by an extension")
          (let ((inhibit-read-only t))
+           (llemar--cancel-displays)
            (erase-buffer)
            (setq llemar--busy nil)
            (llemar--release-tool-markers)
@@ -1083,6 +1220,7 @@ Resuming suppresses it, then adds one after the history is rendered."
 (defun llemar--cleanup ()
   "Shut down this buffer's pi process and discard its log buffer.
 Otherwise a log buffer outlives every conversation that ever ran."
+  (llemar--cancel-displays)
   (when (llemar--process-live-p)
     (process-send-eof llemar--process)
     (delete-process llemar--process))

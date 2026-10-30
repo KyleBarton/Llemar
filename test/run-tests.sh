@@ -30,5 +30,8 @@ emacs -Q --batch --eval "(progn
              (kill-emacs 1))
     (princ \"checkdoc: clean\n\")))"
 
+echo "== companion tool (offline Node tests) =="
+node --test "$here/open-buffer.test.mjs"
+
 echo "== ert =="
 emacs -Q --batch -l "$here/llemar-tests.el" -f ert-run-tests-batch-and-exit

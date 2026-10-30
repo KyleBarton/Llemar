@@ -582,6 +582,155 @@ They are distinct values on the wire and must not collapse together."
           (should (string-match-p "\\* User\n\\'" (buffer-string))))
       (kill-buffer buffer))))
 
+;;;; Editor display requests
+
+(ert-deftest llemar-test-open-buffer-live-results ()
+  "Display live results once and retain editor failures in a tool drawer."
+  (save-window-excursion
+    (delete-other-windows)
+    (llemar-test-with-conversation "open-buffer" "Show me the file"
+      (let ((origin (selected-window)))
+        (should (llemar-test--wait
+                 (lambda () (string-match-p ":LLEMAR_ERROR:" (buffer-string)))))
+        (should (eq (selected-window) origin))
+        (should (eq (window-buffer origin) (current-buffer)))
+        (let ((target (get-buffer-window (find-buffer-visiting llemar-test-mock))))
+          (should (window-live-p target))
+          (should (= (with-current-buffer (window-buffer target)
+                       (line-number-at-pos (window-point target))) 2))))
+      (should (= (how-many "^:LLEMAR_ERROR:" (point-min) (point-max)) 1))
+      (should (member "open_buffer" (llemar-test--headings)))
+      (should (string-match-p "line.*out of range" (buffer-string)))
+      (should (< (string-match-p ":LLEMAR_ERROR:" (buffer-string))
+                 (car (llemar--last-prompt-bounds)))))))
+
+(ert-deftest llemar-test-open-file-validation-and-focus ()
+  "Validate paths and positions while preserving draft and unsaved edits."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (with-current-buffer conversation
+      (let* ((file (make-temp-file (expand-file-name "open-test-" default-directory)))
+             (target (find-file-noselect file)))
+        (unwind-protect
+            (progn
+              (with-current-buffer target (insert "first\nsecond\n"))
+              (goto-char (point-max))
+              (insert "unsent draft")
+              (let ((draft (buffer-string)) (position (point)))
+                (llemar--display-file `((version . 1) (action . "open_file")
+                                        (path . ,file) (line . 2) (column . 3)))
+                (should (equal draft (buffer-string)))
+                (should (= position (point)))
+                (should (eq (window-buffer (selected-window)) conversation)))
+              (dolist (details `(((path . ,file) (version . 2) (action . "open_file"))
+                                 ((path . ,file) (version . 1) (action . "open_file") (column . 1))
+                                 ((path . ,file) (version . 1) (action . "open_file") (line . 99))
+                                 ((path . "/ssh:host:/file") (version . 1) (action . "open_file"))
+                                 ((path . "/etc/hosts") (version . 1) (action . "open_file"))))
+                (should-error (llemar--display-file details))))
+          (with-current-buffer target (set-buffer-modified-p nil))
+          (kill-buffer target)
+          (delete-file file))))))
+
+(ert-deftest llemar-test-open-buffer-ignores-failed-and-unrelated ()
+  "Failed tools and unrelated tools never enqueue an editor action."
+  (llemar-test-with-conversation "basic" "hello"
+    (cl-letf (((symbol-function 'llemar--queue-display)
+               (lambda (&rest _) (ert-fail "Unexpected display request"))))
+      (llemar--handle-event '((type . "tool_execution_end")
+                             (toolCallId . "failed") (toolName . "open_buffer")
+                             (isError . t)))
+      (llemar--handle-event '((type . "tool_execution_end")
+                             (toolCallId . "other") (toolName . "read"))))))
+
+(ert-deftest llemar-test-editor-error-drawer-is-safe ()
+  "Editor diagnostics stay under the tool, never become Org structure."
+  (llemar-test-with-conversation "basic" "hello"
+    (let* ((marker (llemar--tool-marker "error" "open_buffer"))
+           (headings (llemar-test--headings)))
+      (llemar--editor-error marker "bad\n* injected\n:END:\n#+end_example")
+      (should (= (how-many "^:LLEMAR_ERROR:" (point-min) (point-max)) 1))
+      (should-not (member "injected" (llemar-test--headings)))
+      (should (equal headings (llemar-test--headings)))
+      (save-excursion
+        (goto-char marker)
+        (search-backward ":LLEMAR_ERROR:")
+        (forward-line 1)
+        (should (llemar-test--folded-p (point)))))))
+
+(ert-deftest llemar-test-open-buffer-queue-order-and-invalidation ()
+  "Consume once in completion order and discard queued work on restart."
+  (llemar-test-with-conversation "basic" "hello"
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'llemar--display-file)
+                 (lambda (details) (push (alist-get 'path details) calls))))
+        (dolist (id '("second" "first" "second"))
+          (llemar--queue-display
+           `((toolCallId . ,id) (result . ((details . ((path . ,id))))))))
+        (llemar--drain-displays (current-buffer) llemar--process)
+        (should (equal (reverse calls) '("second" "first")))
+        (llemar--queue-display '((toolCallId . "stale")))
+        (llemar--cancel-displays)
+        (should-not llemar--display-queue)
+        (should-not llemar--display-timer)
+        (should (= (hash-table-count llemar--display-seen) 0))))))
+
+(ert-deftest llemar-test-open-buffer-hidden-and-symlink-escape ()
+  "Hidden conversations and paths escaping through symlinks are rejected."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (with-current-buffer conversation
+      (let ((link (make-temp-name (expand-file-name "escape-" default-directory))))
+        (unwind-protect
+            (progn
+              (make-symbolic-link "/etc/hosts" link)
+              (should-error (llemar--display-file
+                             `((version . 1) (action . "open_file") (path . ,link))))
+              (set-window-buffer (selected-window) scratch)
+              (should-error (llemar--display-file
+                             `((version . 1) (action . "open_file")
+                               (path . ,llemar-test-mock)))))
+          (delete-file link))))))
+
+(ert-deftest llemar-test-open-buffer-history-is-passive ()
+  "Saved display requests render without enqueuing editor actions."
+  (llemar-test-with-conversation "basic" "hello"
+    (cl-letf (((symbol-function 'llemar--queue-display)
+               (lambda (&rest _) (ert-fail "Historical result dispatched"))))
+      (llemar--replay-message
+       `((role . "toolResult") (toolCallId . "historical")
+         (toolName . "open_buffer")
+         (content . (((type . "text") (text . "Display requested."))))
+         (details . ((version . 1) (action . "open_file")
+                     (path . ,llemar-test-mock))))))))
+
+(ert-deftest llemar-test-open-buffer-bad-details-stay-in-transcript ()
+  "Malformed results produce local drawers without breaking later events."
+  (llemar-test-with-conversation "basic" "hello"
+    (llemar--handle-event
+     '((type . "tool_execution_end") (toolName . "open_buffer")
+       (toolCallId . "malformed") (result . ((details . "not an object")))))
+    (llemar--drain-displays (current-buffer) llemar--process)
+    (should (string-match-p ":LLEMAR_ERROR:" (buffer-string)))
+    (llemar--handle-event '((type . "agent_settled")))
+    (should-not llemar--busy)))
+
+(ert-deftest llemar-test-open-buffer-preserves-other-conversations ()
+  "Never reuse another conversation window as the file display target."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (let* ((other (generate-new-buffer " *other-llemar*"))
+           (other-window (split-window)))
+      (unwind-protect
+          (progn
+            (with-current-buffer other (llemar-mode))
+            (set-window-buffer other-window other)
+            (with-current-buffer conversation
+              (llemar--display-file
+               `((version . 1) (action . "open_file") (path . ,llemar-test-mock))))
+            (should (eq (window-buffer other-window) other)))
+        (kill-buffer other)))))
+
 (provide 'llemar-tests)
 
 ;;; llemar-tests.el ends here
