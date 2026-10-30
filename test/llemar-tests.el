@@ -490,6 +490,15 @@ They are distinct values on the wire and must not collapse together."
                                           llemar-session-registry)) :name)
                      "Repository navigation")))))
 
+(ert-deftest llemar-test-session-title-review-is-hidden ()
+  "A backend title reminder stays out of the visible conversation."
+  (let ((llemar-session-registry nil))
+    (llemar-test-with-conversation "title-review" "Look around"
+      (should (equal (buffer-name) "*llemar: repository-navigation*"))
+      (should (string-match-p "Done\\." (buffer-string)))
+      (should-not (string-match-p "hidden reminder sentinel" (buffer-string)))
+      (should-not (string-match-p "Session-title check" (buffer-string))))))
+
 (ert-deftest llemar-test-picker-disables-completion-sorting ()
   "Completion UIs must preserve the registry's newest-first order."
   (let ((llemar-session-registry '(("a" :time 1) ("b" :time 2))))

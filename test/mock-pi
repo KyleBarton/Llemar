@@ -99,6 +99,15 @@ def scenario_basic():
     settle()
 
 
+def scenario_title_review():
+    message = {"role": "custom", "customType": "llemar-session-title-review",
+               "content": "Session-title check: hidden reminder sentinel",
+               "display": False}
+    emit({"type": "message_start", "message": message})
+    emit({"type": "message_end", "message": message})
+    scenario_named()
+
+
 def scenario_named():
     begin()
     emit({"type": "session_info_changed", "name": "Repository navigation"})
@@ -223,6 +232,7 @@ SCENARIOS = {
     "open-buffer": scenario_open_buffer,
     "basic": scenario_basic,
     "named": scenario_named,
+    "title-review": scenario_title_review,
     "parallel": scenario_parallel,
     "nullargs": scenario_nullargs,
     "retry": scenario_retry,

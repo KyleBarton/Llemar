@@ -145,7 +145,23 @@ installed, moving through candidates previews their saved Org transcripts.
 Without Consult, the picker uses ordinary `completing-read`.
 
 The companion extension asks the conversation's model to use `set_session_name`
-once the theme is clear, and to revise it when the topic changes substantially.
+once its overarching purpose is clear, and to correct the title when intent
+becomes clearer or the topic changes substantially. It also adds a hidden title
+review reminder on the third user-started run, then every five user-started
+runs (3, 8, 13, …). Reviews do not require a rename or a separate model request;
+brief tangents should leave a useful title unchanged. Tool-loop turns and
+custom-message-started runs do not advance the schedule.
+
+The review schedule is stored in pi's session history and follows the active
+branch across resume and extension reload. Counting begins when this version
+of the extension first handles a user request. Change the interval after the
+initial review using pi's `--session-title-review-interval` flag (a positive
+integer; invalid values fall back to five), for example:
+
+```elisp
+(setq llemar-extra-args '("--session-title-review-interval" "10"))
+```
+
 The title is saved in pi's session history and used for the picker and buffer
 name. The first prompt remains a fallback until the model supplies a title.
 
