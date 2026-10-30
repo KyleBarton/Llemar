@@ -1,0 +1,10 @@
+#+title: Quick fixes
+
+* TODO Show diffs for write tool calls
+Apply the diff behavior currently provided for =edit= tool calls to =write=
+tool calls as well.
+
+Successful writes should display a syntax-highlighted Org =diff= source block,
+expanded by default and kept complete regardless of the tool-result line cap,
+consistent with edit diffs. Include coverage for both live output and resumed
+history using deterministic offline tests.

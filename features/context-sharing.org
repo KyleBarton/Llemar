@@ -1,0 +1,50 @@
+#+title: Effortless context sharing
+
+* Goal
+Make it easy to bring editing context into a Llemar conversation without
+manual copying or losing the user's place in their source buffer.
+
+* Desired behavior
+Provide convenient ways to ask the agent about:
+- The active region.
+- A file or the current buffer.
+- A diagnostic or error location.
+- Working-tree changes for review.
+
+Make clear what context will be sent: a reference, a captured text excerpt,
+or a diff. Prefer preparing an editable prompt over silently sending it.
+
+* Embark integration
+- Take advantage of Embark when available, using actions on relevant targets
+  such as files and regions, and diagnostics where supported.
+- Keep Embark optional: core context-sharing commands must work without it.
+- Reuse the same underlying commands for direct invocation and Embark actions.
+- Determine appropriate target types and action maps during implementation;
+  do not assume every desired context already has a built-in Embark target.
+
+* Implementation guidance
+- Preserve the source editing location and avoid unnecessary window changes.
+- Make the destination conversation explicit, especially when several are
+  open or the source file belongs to a different project.
+- Preserve file paths and useful line information with captured excerpts.
+- Escape inserted context so it cannot corrupt the conversation's Org structure.
+- Reuse existing Emacs facilities for diagnostics and working-tree diffs rather
+  than implementing competing interfaces.
+
+* Acceptance criteria
+- A user can add a region or file reference to a conversation without manually
+  copying and pasting it.
+- The prepared prompt clearly identifies the source and included content.
+- Context insertion preserves any existing unsent draft.
+- Embark offers relevant Llemar actions when installed, and its absence does
+  not prevent loading or using Llemar.
+- Destination selection and source-window behavior are predictable.
+- Tests cover context formatting, Org escaping, destination selection, and
+  operation with and without optional Embark integration; any RPC behavior
+  uses deterministic offline test/mock-pi scenarios.
+
+* Open questions
+- How should the destination conversation be selected or remembered per project?
+- When should a file be shared as a reference versus a captured excerpt?
+- Which diagnostic and diff integrations should be included in the first pass?
+- Should context be inserted immediately or collected before composing a prompt?

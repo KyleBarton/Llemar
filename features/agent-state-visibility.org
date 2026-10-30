@@ -1,0 +1,36 @@
+#+title: Make the current agent state obvious
+
+* Goal
+Make the active conversation's identity and agent state apparent at a glance,
+without requiring users to inspect the transcript or diagnostic log.
+
+* Desired behavior
+- Show the project or working directory, model, and session identity.
+- Distinguish thinking, running a tool, waiting for user input, idle, and error
+  or disconnected states where pi exposes those distinctions.
+- Make it clear whether user input was sent, queued, or used to steer a run.
+- Expose context usage and compaction status when available from pi.
+- Keep the presentation compact; a mode-line indicator is a candidate, not a
+  settled design.
+
+* Implementation guidance
+- Use pi's RPC events and state as the source of truth. Do not implement a
+  separate context-management or agent-state system in Llemar.
+- Handle unavailable information honestly rather than guessing a state.
+- Ensure state remains correct after abort, process death, restart, and resume.
+- Avoid cluttering the conversation transcript with routine status updates.
+
+* Acceptance criteria
+- A user can identify the active project, model, and session without issuing
+  a diagnostic command.
+- A user can tell whether the agent is working, needs input, has finished, or
+  has lost its connection.
+- Input disposition is visible when sending or steering during a run.
+- Context and compaction information reflects what pi actually reports.
+- State transitions and recovery paths are covered by deterministic offline
+  tests using scenarios in test/mock-pi.
+
+* Open questions
+- Which information belongs in the mode line versus an on-demand status view?
+- Which states and context metrics are available through the current RPC API?
+- How should long project and session names be abbreviated?
