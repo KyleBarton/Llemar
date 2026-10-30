@@ -4,7 +4,28 @@ An LL(m) ema(cs) r(epl).
 
 Llemar is an Emacs front end for [pi](https://pi.dev), a minimal agent harness.
 It runs `pi --mode rpc` as a subprocess and renders the session into an
-org-mode buffer.
+org-mode buffer. Emacs owns the conversation UI; pi owns the agent, model
+access, tools, and session history.
+
+## Current features
+
+- **Streaming Org conversations:** assistant turns, thinking drawers, and nested
+  tool calls appear as they arrive, with a fresh user prompt when the run settles.
+- **Foldable tool output:** pretty-printed JSON arguments, result blocks, errors,
+  and execution durations stay attached to the right call, even when parallel
+  tools finish out of order.
+- **Inline edit diffs:** successful `edit` calls show pi's unified patch in a
+  syntax-highlighted Org `diff` source block, including in resumed history.
+- **Session resume:** choose a previously recorded Llemar session and continue
+  with its saved transcript rendered in a new buffer.
+- **Agent-driven file display:** the companion `open_buffer` tool opens local
+  project files at an optional line and column, without stealing focus.
+- **Run controls:** send prompts, steer or abort an active run, start a fresh
+  session, restart pi, inspect session state, and view diagnostic logs.
+- **Output following:** windows at the end follow new output; scrolling back
+  leaves your reading position alone.
+- **Org-native transcripts:** use normal folding, links, export, and file saving.
+  Agent output is escaped so it cannot accidentally restructure the outline.
 
 ## Architecture
 
@@ -88,6 +109,40 @@ applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
 
+### Edit diffs
+
+A successful `edit` tool result includes the normal success message followed by
+pi's per-operation unified patch:
+
+```org
+#+begin_src diff
+--- a/example.el
++++ b/example.el
+@@ -1 +1 @@
+-(message "Hello")
++(message "Hello, world")
+#+end_src
+```
+
+Org uses `diff-mode` highlighting when `org-src-fontify-natively` is enabled.
+Diffs are expanded by default, unlike other tool blocks; fold them with `TAB`.
+They are kept complete, regardless of the ordinary tool-result line cap.
+Failed edits and results without a patch retain their normal output. This
+currently covers the `edit` tool, not `write` or file changes made by shell commands.
+
+### Resuming a session
+
+`M-x llemar-resume` offers sessions Llemar has recorded for the current working
+directory; `C-u M-x llemar-resume` offers sessions across directories. Selecting
+one starts a pi process attached to that session, renders its saved history,
+and leaves a fresh prompt ready to continue. Historical file-display requests
+are passive: resuming does not reopen those files.
+
+Only sessions driven through Llemar are offered, not sessions started in pi's
+own interface. Enable `savehist-mode` to preserve Llemar's session registry
+across Emacs restarts. Conversation buffer names incorporate the session name
+or first prompt to help distinguish multiple conversations.
+
 ## Showing files from the agent
 
 Llemar explicitly loads its companion pi extension, which gives the agent an
@@ -115,16 +170,20 @@ The tests drive `test/mock-pi`, a stand-in that speaks pi's RPC protocol and
 replays named event scripts, so the suite needs no model, no network, and costs
 nothing. Scenarios cover streaming and non-streaming turns, parallel tool calls
 with out-of-order results, org-hostile prose and tool output, retries, aborts,
-and process death.
+process death, session resume, and live and replayed edit diffs.
 
 ## Configuration
 
 - `llemar-executable` — path to pi, default `"pi"`
 - `llemar-extra-args` — extra pi arguments, e.g. `("--model" "claude-opus-5")`
-- `llemar-max-tool-result-lines` — tool output line cap, default 100, nil for no cap
+- `llemar-buffer-name-function` — function used to name new conversation buffers
+- `llemar-max-tool-result-lines` — tool output line cap, default 100, nil for no cap;
+  edit diff blocks are not truncated
 - `llemar-show-thinking` — render thinking into a `THINKING` drawer, default t
 - `llemar-fold-thinking` — collapse a thinking drawer once complete, default t
-- `llemar-fold-blocks` — collapse tool argument and result blocks, default t
+- `llemar-fold-blocks` — collapse tool argument and result blocks, default t;
+  diff blocks remain expanded
+- `llemar-follow-output` — follow output in windows already at the end, default t
 - `llemar-user-heading` / `llemar-assistant-heading` — headline text
 
 ## Keeping org structure intact
@@ -152,7 +211,6 @@ both go away with the markdown-to-org conversion listed below:
 ## Next steps
 
 - Markdown-to-org conversion for assistant prose, replacing the leading-space escape
-- Session resume: reattach a buffer to an existing pi session file
 - Surface queue state, token usage, and cost in the mode line
 - Render pi's extension UI requests (dialogs, notifications)
 - `AGENTS.md`, skills, and memory management from Emacs

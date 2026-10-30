@@ -862,6 +862,14 @@ exactly as the agent sent them."
                            "(no output)"
                          text)
                        llemar-max-tool-result-lines))
+    (when-let* ((patch (and (equal (alist-get 'toolName record) "edit")
+                           (not (alist-get 'isError record))
+                           (alist-get 'patch
+                                      (alist-get 'details
+                                                 (alist-get 'result record)))))
+                ((and (stringp patch) (not (string-blank-p patch)))))
+      (let ((llemar-fold-blocks nil))
+        (llemar--insert-block marker "#+begin_src diff" patch "#+end_src")))
     (when duration
       (save-excursion
         (goto-char marker)
@@ -944,7 +952,8 @@ headings."
       `((toolCallId . ,(alist-get 'toolCallId message))
         (toolName . ,(alist-get 'toolName message))
         (isError . ,(alist-get 'isError message))
-        (result . ((content . ,(alist-get 'content message)))))))
+        (result . ((content . ,(alist-get 'content message))
+                   (details . ,(alist-get 'details message)))))))
     (_ nil)))
 
 (defun llemar--replay-messages (messages)

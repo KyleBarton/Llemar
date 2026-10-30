@@ -123,6 +123,36 @@ def scenario_nullargs():
     settle()
 
 
+EDIT_PATCH = "--- a/example.el\n+++ b/example.el\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n"
+
+
+def messages_edit():
+    messages = [{"role": "assistant", "content": []}]
+    for call_id, name, error, details in [
+            ("edit-ok", "edit", False, {"patch": EDIT_PATCH}),
+            ("edit-error", "edit", True, {"patch": EDIT_PATCH}),
+            ("edit-legacy", "edit", False, {}),
+            ("other", "bash", False, {"patch": EDIT_PATCH})]:
+        messages.append({"role": "toolResult", "toolCallId": call_id,
+                         "toolName": name, "isError": error,
+                         "content": [{"type": "text", "text": call_id}],
+                         "details": details})
+    return messages
+
+
+def scenario_edit():
+    begin()
+    end_message()
+    for message in messages_edit()[1:]:
+        emit({"type": "tool_execution_end",
+              "toolCallId": message["toolCallId"],
+              "toolName": message["toolName"],
+              "isError": message["isError"],
+              "result": {"content": message["content"],
+                         "details": message["details"]}})
+    settle()
+
+
 def scenario_retry():
     begin()
     emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
@@ -181,6 +211,7 @@ def scenario_open_buffer():
 
 
 SCENARIOS = {
+    "edit": scenario_edit,
     "open-buffer": scenario_open_buffer,
     "basic": scenario_basic,
     "parallel": scenario_parallel,
@@ -192,6 +223,7 @@ SCENARIOS = {
 
 MESSAGE_SCRIPTS = {
     "resume": messages_resume,
+    "edit": messages_edit,
 }
 
 

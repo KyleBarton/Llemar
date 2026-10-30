@@ -582,6 +582,48 @@ They are distinct values on the wire and must not collapse together."
           (should (string-match-p "\\* User\n\\'" (buffer-string))))
       (kill-buffer buffer))))
 
+;;;; Edit diffs
+
+(defun llemar-test--assert-edit-diff ()
+  "Assert that only the successful edit has a complete diff block."
+  (let ((blocks (org-element-map (org-element-parse-buffer) 'src-block
+                  (lambda (block)
+                    (when (equal (org-element-property :language block) "diff")
+                      block)))))
+    (should (= (length blocks) 1))
+    (should (equal (org-element-property :value (car blocks))
+                   "--- a/example.el\n+++ b/example.el\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n"))
+    (goto-char (org-element-property :begin (car blocks)))
+    (forward-line 1)
+    (should-not (llemar-test--folded-p (point)))
+    (org-back-to-heading t)
+    (should (equal (org-get-heading t t t t) "edit")))
+  (should (string-match-p "edit-ok" (buffer-string)))
+  (should (string-match-p "edit-error" (buffer-string)))
+  (should (string-match-p "edit-legacy" (buffer-string))))
+
+(ert-deftest llemar-test-edit-diff-live ()
+  "Successful edit patches render as complete diff source blocks."
+  (let ((llemar-max-tool-result-lines 2))
+    (llemar-test-with-conversation "edit" "Edit a file"
+      (llemar-test--assert-edit-diff))))
+
+(ert-deftest llemar-test-edit-diff-replay ()
+  "Saved edit results retain their patches when resumed."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("edit"))
+         (llemar-session-registry nil)
+         (buffer (llemar-resume
+                  (list "edit-session" :cwd llemar-test-directory
+                        :file "/tmp/edit.jsonl" :label "edit"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (llemar-test--wait
+                   (lambda () (string-match-p "edit-legacy" (buffer-string)))
+                   llemar--process))
+          (llemar-test--assert-edit-diff))
+      (kill-buffer buffer))))
+
 ;;;; Editor display requests
 
 (ert-deftest llemar-test-open-buffer-live-results ()
