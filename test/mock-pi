@@ -99,6 +99,14 @@ def scenario_basic():
     settle()
 
 
+def scenario_named():
+    begin()
+    emit({"type": "session_info_changed", "name": "Repository navigation"})
+    assistant_text(["Done."])
+    end_message()
+    settle()
+
+
 def scenario_parallel():
     begin()
     assistant_text(["Checking two things  right now — café 日本語 \U0001F600\n"])
@@ -214,6 +222,7 @@ SCENARIOS = {
     "edit": scenario_edit,
     "open-buffer": scenario_open_buffer,
     "basic": scenario_basic,
+    "named": scenario_named,
     "parallel": scenario_parallel,
     "nullargs": scenario_nullargs,
     "retry": scenario_retry,

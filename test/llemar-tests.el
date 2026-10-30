@@ -431,6 +431,75 @@ They are distinct values on the wire and must not collapse together."
 
 ;;;; Session registry and resume
 
+(defvar llemar-session-directory)
+;; Keep all transcript writes offline and outside the user's configuration.
+(setq llemar-session-directory (make-temp-file "llemar-test-sessions-" t))
+(add-hook 'kill-emacs-hook
+          (lambda () (delete-directory llemar-session-directory t)))
+
+(ert-deftest llemar-test-session-transcript-saved ()
+  "Settled output is saved as Org and recorded for preview."
+  (let ((llemar-session-registry nil))
+    (llemar-test-with-conversation "basic" "Inspect repository"
+      (let ((file (plist-get (cdr (assoc llemar--session-id
+                                        llemar-session-registry)) :org-file)))
+        (should (stringp file))
+        (should (file-exists-p file))
+        (should (equal (file-name-directory file)
+                       (file-name-as-directory llemar-session-directory)))
+        (should (= (logand (file-modes file) #o777) #o600))
+        (should (equal (with-temp-buffer
+                         (insert-file-contents file) (buffer-string))
+                       (buffer-string)))))))
+
+(ert-deftest llemar-test-consult-session-preview ()
+  "Consult preserves order and previews readable Org transcripts."
+  (let* ((original-require (symbol-function 'require))
+         (file (make-temp-file "llemar-preview-" nil ".org"))
+         (llemar-session-registry
+          (list (list "a" :time 1) (list "b" :time 2 :org-file file)))
+         previewed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &rest args)
+                     (if (eq feature 'consult) t
+                       (apply original-require feature args))))
+                  ((symbol-function 'consult--file-preview)
+                   (lambda () (lambda (action file)
+                                (setq previewed (list action file)))))
+                  ((symbol-function 'consult--read)
+                   (lambda (candidates &rest options)
+                     (should-not (plist-get options :sort))
+                     (let ((state (plist-get options :state)))
+                       (funcall state 'preview (car candidates))
+                       (should (equal previewed (list 'preview file)))
+                       (funcall state 'preview (cadr candidates))
+                       (should (equal previewed '(preview nil)))
+                       (funcall state 'exit nil)
+                       (should (equal previewed '(exit nil))))
+                     (car candidates))))
+          (should (equal (car (llemar--read-session)) "b")))
+      (delete-file file))))
+
+(ert-deftest llemar-test-model-session-name ()
+  "A title from pi supersedes the initial prompt and is saved."
+  (let ((llemar-session-registry nil))
+    (llemar-test-with-conversation "named" "Look around"
+      (should (equal (buffer-name) "*llemar: repository-navigation*"))
+      (should (equal (plist-get (cdr (assoc llemar--session-id
+                                          llemar-session-registry)) :name)
+                     "Repository navigation")))))
+
+(ert-deftest llemar-test-picker-disables-completion-sorting ()
+  "Completion UIs must preserve the registry's newest-first order."
+  (let ((llemar-session-registry '(("a" :time 1) ("b" :time 2))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 (should (eq (plist-get completion-extra-properties
+                                        :display-sort-function) #'identity))
+                 (car collection))))
+      (should (equal (car (llemar--read-session)) "b")))))
+
 (ert-deftest llemar-test-records-session-on-start ()
   "Starting a conversation records its session id and directory."
   (let* ((llemar-executable llemar-test-mock)

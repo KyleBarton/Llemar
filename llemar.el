@@ -65,6 +65,13 @@ Llemar always supplies `--mode rpc'.  Use this for things like
 Called with one argument, the agent's working directory."
   :type 'function)
 
+(defcustom llemar-session-directory
+  (expand-file-name "llemar/sessions/" user-emacs-directory)
+  "Directory for automatically saved Org conversation transcripts.
+These are preview copies; pi's session files remain the source of truth
+when resuming.  Transcripts may contain sensitive prompts and tool output."
+  :type 'directory)
+
 (defcustom llemar-max-tool-result-lines 100
   "Maximum number of lines of tool output to insert into the buffer.
 Longer results are truncated with a note.  Set to nil to insert everything."
@@ -150,7 +157,7 @@ A window scrolled up to read earlier output is left undisturbed."
   "Sessions Llemar has driven, available for `llemar-resume'.
 
 An alist keyed by pi session id; each value is a plist with :cwd, :file,
-:name, :label, and :time.  Only sessions Llemar itself started are
+:name, :label, :org-file, and :time.  Only sessions Llemar itself started are
 tracked here; sessions created in pi's own interface are not.
 
 Add it to `savehist-additional-variables' to keep it across Emacs
@@ -254,6 +261,42 @@ With DIRECTORY, keep only sessions recorded for it."
                 (plist-get plist :label)
                 (car entry)))))
 
+(declare-function consult--read "consult")
+(declare-function consult--file-preview "consult")
+
+(defun llemar--save-transcript ()
+  "Save an Org preview copy of this conversation, when its id is known.
+Failures are logged rather than interrupting the RPC event stream."
+  (when llemar--session-id
+    (condition-case err
+        (let* ((directory (file-name-as-directory
+                           (expand-file-name llemar-session-directory)))
+               (file (expand-file-name
+                      (concat (secure-hash 'sha256 llemar--session-id) ".org")
+                      directory))
+               (coding-system-for-write 'utf-8-unix))
+          (make-directory directory t)
+          (let ((temporary (make-temp-file
+                            (expand-file-name ".transcript-" directory))))
+            (unwind-protect
+                (progn
+                  (save-restriction
+                    (widen)
+                    (write-region (point-min) (point-max) temporary nil 'silent))
+                  (rename-file temporary file t))
+              (when (file-exists-p temporary) (delete-file temporary))))
+          (llemar--registry-put llemar--session-id :org-file file))
+      (error (llemar--log (current-buffer)
+                          (format "transcript save failed: %s"
+                                  (error-message-string err)))))))
+
+(defun llemar--session-preview (choices)
+  "Create a Consult preview state for session CHOICES."
+  (let ((preview (consult--file-preview)))
+    (lambda (action candidate)
+      (let ((file (plist-get (cdr (cdr (assoc candidate choices))) :org-file)))
+        (funcall preview action (and file (file-readable-p file) file))))))
+
 (defun llemar--read-session (&optional directory)
   "Read a recorded session to resume, limited to DIRECTORY when non-nil.
 Return the chosen registry entry, or signal a `user-error' if none exist."
@@ -264,9 +307,17 @@ Return the chosen registry entry, or signal a `user-error' if none exist."
     (unless choices
       (user-error "No Llemar sessions recorded%s"
                   (if directory (format " for %s" directory) "")))
-    (cdr (assoc (completing-read "Resume session: "
-                                 (mapcar #'car choices) nil t)
-                choices))))
+    (let* ((completion-extra-properties
+            '(:display-sort-function identity :cycle-sort-function identity))
+           (candidates (mapcar #'car choices))
+           (choice (if (require 'consult nil t)
+                       (consult--read candidates
+                                      :prompt "Resume session: "
+                                      :sort nil :require-match t
+                                      :category 'llemar-session
+                                      :state (llemar--session-preview choices))
+                     (completing-read "Resume session: " candidates nil t))))
+      (cdr (assoc choice choices)))))
 
 ;;;; Process management
 
@@ -751,7 +802,8 @@ RAW is the JSON line RECORD was parsed from."
      (llemar--set-status nil)
      (when (alist-get 'aborted record)
        (llemar--note "aborted"))
-     (llemar--open-user-prompt))
+     (llemar--open-user-prompt)
+     (llemar--save-transcript))
     ("auto_retry_start"
      (llemar--set-status "retrying")
      (llemar--note (format "retry %s/%s: %s"
@@ -973,6 +1025,7 @@ A fresh user prompt is left at the end, ready to continue the session."
        (llemar--replay-messages
         (alist-get 'messages (alist-get 'data response)))
        (llemar--open-user-prompt)
+       (llemar--save-transcript)
        (llemar--set-status nil)))))
 
 ;;;; Prompt handling
@@ -1120,6 +1173,7 @@ Resuming suppresses it, then adds one after the history is rendered."
                                :label)))
       (llemar--registry-put llemar--session-id
                             :label (llemar--one-line text 72)))
+    (llemar--save-transcript)
     (set-marker (llemar--marker) (point-max))
     (llemar--release-tool-markers)
     (clrhash llemar--streamed-blocks)
@@ -1154,6 +1208,7 @@ Resuming suppresses it, then adds one after the history is rendered."
   (interactive)
   (when (or (not llemar--busy)
             (yes-or-no-p "Agent is running.  Start a new session anyway? "))
+    (llemar--save-transcript)
     (llemar--send
      '((type . "new_session"))
      (lambda (response)
@@ -1224,6 +1279,7 @@ Resuming suppresses it, then adds one after the history is rendered."
   (setq llemar--streamed-blocks (make-hash-table :test #'equal))
   (setq llemar--insert-marker (copy-marker (point-max) t))
   (setq-local org-hide-drawer-startup t)
+  (add-hook 'kill-buffer-hook #'llemar--save-transcript nil t)
   (add-hook 'kill-buffer-hook #'llemar--cleanup nil t))
 
 (defun llemar--cleanup ()

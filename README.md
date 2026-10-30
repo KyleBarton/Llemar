@@ -140,8 +140,29 @@ are passive: resuming does not reopen those files.
 
 Only sessions driven through Llemar are offered, not sessions started in pi's
 own interface. Enable `savehist-mode` to preserve Llemar's session registry
-across Emacs restarts. Conversation buffer names incorporate the session name
-or first prompt to help distinguish multiple conversations.
+across Emacs restarts. Sessions are listed newest-first; when Consult is
+installed, moving through candidates previews their saved Org transcripts.
+Without Consult, the picker uses ordinary `completing-read`.
+
+The companion extension asks the conversation's model to use `set_session_name`
+once the theme is clear, and to revise it when the topic changes substantially.
+The title is saved in pi's session history and used for the picker and buffer
+name. The first prompt remains a fallback until the model supplies a title.
+
+Org preview copies are saved automatically when sending, when a run settles,
+after resuming history, before starting a fresh session, and when killing a
+conversation buffer. Configure their location with:
+
+```elisp
+(setq llemar-session-directory
+      (expand-file-name "llemar/sessions/" user-emacs-directory))
+```
+
+Transcripts use stable filenames independent of their titles, are written
+atomically with owner-only permissions, and may contain sensitive conversation
+and tool output. They are preview copies, not the source used for resuming:
+pi's session history remains authoritative. Older sessions gain previews when
+next resumed.
 
 ## Showing files from the agent
 

@@ -31,7 +31,7 @@ emacs -Q --batch --eval "(progn
     (princ \"checkdoc: clean\n\")))"
 
 echo "== companion tool (offline Node tests) =="
-node --test "$here/open-buffer.test.mjs"
+node --test "$here/"*.test.mjs
 
 echo "== ert =="
 emacs -Q --batch -l "$here/llemar-tests.el" -f ert-run-tests-batch-and-exit
