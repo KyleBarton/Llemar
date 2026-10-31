@@ -65,14 +65,15 @@ and closes that buffer and its pi process after the new conversation starts
 successfully. Use `M-x llemar-other-window` to keep the existing conversation
 open. If starting the new conversation fails, the existing one is left intact.
 
-Type your prompt under the trailing `* User` heading and press `C-c C-c`. The
-reply streams in below it, and a fresh `* User` heading appears when the agent
-settles.
+Type your prompt under the trailing `** User` heading in `* Current` and
+press `C-c C-c`. The reply streams in below it, and a fresh `** User` heading
+appears when the agent settles.
 
 | Key | Command |
 | --- | --- |
 | `C-c C-c` | Send the trailing user prompt |
-| `C-c C-k` | Abort the current run |
+| `C-c C-k` | Abort the current operation, including compaction |
+| `C-c C-m` | Compact context (`llemar-compact`; prefix prompts for instructions) |
 | `C-c C-s` | Steer a running agent |
 | `C-c C-n` | Start a fresh session |
 | `C-c C-r` | Restart the pi process |
@@ -82,16 +83,17 @@ settles.
 A transcript looks like this:
 
 ```org
-* User
+* Current
+** User
 What files are here?
 
-* Assistant
+** Assistant
 :THINKING:
 Let me check the repo.
 :END:
 Here is the plan.
 
-** bash
+*** bash
 #+begin_src json
 {
   "command": "ls -la"
@@ -102,18 +104,40 @@ README.md
 llemar.el
 #+end_example
 
-* Assistant
+** Assistant
 Two files. Done.
 
-* User
+** User
 ```
 
-Each assistant turn is its own `* Assistant` heading, with tool calls nested
+Each assistant turn is its own `** Assistant` heading, with tool calls nested
 beneath the turn that made them. Thinking drawers and tool blocks collapse as
 they complete, so a long run stays readable; `TAB` opens any of them. Org
 applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
+
+### Compaction
+
+`M-x llemar-compact` (or `C-c C-m`) asks pi to compact context on demand once
+the agent is idle. With `C-u`, enter optional instructions for the summary.
+`C-c C-k` can cancel compaction. Automatic threshold and overflow compactions
+use the same presentation, without interrupting continued generation.
+
+The mode line shows `compacting` during the operation. After confirmed
+success, the compacted prefix becomes a timestamped top-level `Compacted`
+section with `Source` (the preserved original transcript) and `Summary`
+(pi's actual retained summary). Recent messages still in context stay under
+`Current`, along with subsequent output and any unsent draft. Repeated
+compactions create sibling archives rather than replacing earlier records.
+Failed or cancelled compactions leave the conversation structure intact.
+
+On resume, Llemar uses pi's raw session entries and active branch to recover
+pre-compaction source and summaries. Saved Org archive annotations are reused
+when their compaction IDs match that branch, along with a trailing local draft.
+These Org copies never replace pi's authoritative model context. If raw history
+or an exact rendered boundary is unavailable, Llemar reports the limitation
+rather than claiming retained messages were removed or silently dropping source.
 
 ### Edit and write diffs
 

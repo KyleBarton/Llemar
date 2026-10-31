@@ -90,12 +90,24 @@ source and summary records rather than overwrite them.
   structure, successful automatic compaction, failure/cancellation, repeated
   compaction, continued generation, and resume. No real model calls are required.
 
-* Open questions
-- Which pi events or session records expose the summary, timestamp, and exact
-  compacted/retained boundary, both live and on resume?
-- Should repeated compactions form sibling archive sections or nest previous
-  records, and how should retained messages be represented without duplication?
-- Should archived source start folded while its summary remains visible?
-- How much source can be reconstructed on resume without a saved Org transcript?
-- Should explicitly requested compaction use the same presentation? Ideally,
-  the representation should be consistent regardless of what triggered it.
+* Implementation
+- =llemar-compact= (=C-c C-m=) requests on-demand compaction while idle.
+  A prefix argument prompts for custom instructions. =llemar-abort= cancels
+  the operation. Manual and automatic compaction share the archive renderer.
+- =compaction_start= / =compaction_end= drive progress and terminal outcomes.
+  =get_entries= provides the persisted timestamp and =firstKeptEntryId=;
+  rendered message markers identify the exact retained boundary. If that
+  boundary is unavailable, the summary is shown with an explicit warning and
+  no source is moved. No guessed boundary is substituted.
+- Repeated archives are siblings. Source keeps its existing block folding;
+  summaries use escaped example blocks with the normal block-folding option.
+- Resume follows parent IDs from pi's active leaf, rendering raw message and
+  compaction entries in order. This reconstructs source even without an Org
+  preview; context-only =get_messages= is a fallback with a limitation notice.
+- Persisted =LLEMAR_COMPACTION_ID= properties reconcile matching saved Org
+  archive subtrees, preserving local source annotations and rendering. A saved
+  trailing draft is restored with those archives. Current-section annotations
+  other than that draft are not replayed as backend state.
+- Offline scenarios cover manual/automatic compaction, retained and retain-none
+  boundaries, repeated compaction, failure/cancellation, continued output,
+  unknown boundaries, and reconstruction/reconciliation on resume.

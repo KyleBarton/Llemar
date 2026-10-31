@@ -263,7 +263,7 @@ BUFFER is bound to the conversation buffer inside BODY."
 (ert-deftest llemar-test-folding-leaves-structure-visible ()
   "Headlines, prose, and the block delimiters themselves stay visible."
   (llemar-test-with-conversation "basic" "go"
-    (dolist (regexp '("^\\* User$" "^\\* Assistant$" "^\\*\\* bash$"
+    (dolist (regexp '("^\\*\\* User$" "^\\*\\* Assistant$" "^\\*\\*\\* bash$"
                       "^:THINKING:$" "^#\\+begin_src json$"
                       "Here is the plan\\." "Two files\\. Done\\."))
       (llemar-test--goto regexp)
@@ -276,7 +276,7 @@ could silently vanish."
   (llemar-test-with-conversation "basic" "go"
     (llemar-test--goto "Two files\\. Done\\.")
     (should-not (llemar-test--folded-p (point)))
-    (llemar-test--goto "^\\* User$")
+    (llemar-test--goto "^\\*\\* User$")
     (goto-char (point-max))
     (should-not (llemar-test--folded-p (max (point-min) (1- (point)))))))
 
@@ -298,13 +298,13 @@ could silently vanish."
   "Each turn is its own headline, with tool calls nested under it."
   (llemar-test-with-conversation "basic" "go"
     (should (equal (llemar-test--headings)
-                   '("User" "Assistant" "bash" "Assistant" "User")))))
+                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))))
 
 (ert-deftest llemar-test-hostile-prose-makes-no-headlines ()
   "Markdown bold and bullets at column 0 cannot become headlines."
   (llemar-test-with-conversation "basic" "go"
     (should (equal (llemar-test--headings)
-                   '("User" "Assistant" "bash" "Assistant" "User")))
+                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))
     (should (string-match-p "^ \\*\\*Step one\\*\\*: look around\\.$"
                             (buffer-string)))))
 
@@ -331,7 +331,7 @@ interrupts."
     (llemar-steer "please focus")
     (should-not (member "Steering" (llemar-test--headings)))
     (should (equal (llemar-test--headings)
-                   '("User" "Assistant" "bash" "Assistant" "User")))
+                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))
     (llemar-test--goto "^:STEERING:$")
     (llemar-test--goto "please focus")
     (should (org-element-parse-buffer))))
@@ -348,9 +348,9 @@ interrupts."
   "Each result lands under its own tool headline, whatever the order."
   (llemar-test-with-conversation "parallel" "go"
     (should (equal (llemar-test--headings)
-                   '("User" "Assistant" "bash" "read_file" "User")))
+                   '("Current" "User" "Assistant" "bash" "read_file" "User")))
     (dolist (probe '(("bash" . "line 1") ("read_file" . "An LL(m)")))
-      (llemar-test--goto (format "^\\*\\* %s$" (car probe)))
+      (llemar-test--goto (format "^\\*\\*\\* %s$" (car probe)))
       (let ((limit (save-excursion
                      (forward-line 1)
                      (or (re-search-forward "^\\*+ " nil t) (point-max)))))
@@ -380,6 +380,155 @@ They are distinct values on the wire and must not collapse together."
   (llemar-test-with-conversation "parallel" "go"
     (should (string-match-p "café 日本語 😀" (buffer-string)))
     (should (string-match-p " " (buffer-string)))))
+
+;;;; Compaction
+
+(ert-deftest llemar-test-compaction-current-from-start ()
+  "Conversations are nested beneath Current even before compaction."
+  (llemar-test-with-conversation "basic" "go"
+    (should (string-match-p "^\\* Current\n\\*\\* User" (buffer-string)))
+    (should (string-match-p "^\\*\\*\\* bash$" (buffer-string)))))
+
+(ert-deftest llemar-test-compaction-manual-preserves-draft ()
+  "Manual compaction archives only the removed prefix, keeping a draft."
+  (llemar-test-with-conversation "compact-manual" "go"
+    (should (commandp 'llemar-compact))
+    (goto-char (point-max))
+    (insert "unsent draft\n")
+    (llemar-compact "Keep implementation details")
+    (should-error (llemar-compact) :type 'user-error)
+    (llemar-test--settle)
+    (should (llemar-test--wait
+             (lambda () (string-match-p "^\\* Compacted " (buffer-string)))
+             llemar--process))
+    (should (equal (llemar-test--headings)
+                   '("Compacted 2026-01-02 03:04:05 +0000" "Source" "User" "Assistant" "bash"
+                     "Summary" "Current" "Assistant" "User")))
+    (should (string-match-p "^\\*\\*\\*\\* bash$" (buffer-string)))
+    (should (string-match-p "^,\\* not a heading$" (buffer-string)))
+    (should (string-match-p "^,#\\+end_example$" (buffer-string)))
+    (should (string-match-p "^\\*\\*\\* Assistant\nOriginal answer" (buffer-string)))
+    (should (string-match-p "^\\*\\* Assistant\nRetained answer" (buffer-string)))
+    (should (string-match-p "Remember the old exchange" (buffer-string)))
+    (should (equal (string-trim (buffer-substring-no-properties
+                                 (car (llemar--last-prompt-bounds)) (point-max)))
+                   "unsent draft"))
+    (should-not llemar--status)))
+
+(ert-deftest llemar-test-compaction-missing-boundary-is-explicit ()
+  "Unknown boundaries show the real summary without claiming to archive source."
+  (llemar-test-with-conversation "compact-unknown" "go"
+    (goto-char (point-max))
+    (insert "draft\n")
+    (llemar-compact)
+    (llemar-test--settle)
+    (should (llemar-test--wait
+             (lambda () (string-match-p "exact source boundary unavailable" (buffer-string)))
+             llemar--process))
+    (should-not (member "Source" (llemar-test--headings)))
+    (should (string-match-p "Remember the old exchange" (buffer-string)))
+    (should (equal "draft" (string-trim (buffer-substring-no-properties
+                                         (car (llemar--last-prompt-bounds)) (point-max)))))))
+
+(ert-deftest llemar-test-compaction-repeated ()
+  "Repeated compaction retains earlier archives without duplicating messages."
+  (llemar-test-with-conversation "compact-manual" "go"
+    (dotimes (index 2)
+      (llemar-compact)
+      (llemar-test--settle)
+      (should (llemar-test--wait
+               (lambda () (= (1+ index) (cl-count "Summary" (llemar-test--headings)
+                                                  :test #'equal))) llemar--process)))
+    (should (= 1 (how-many "Original answer" (point-min) (point-max))))
+    (should (= 1 (how-many "Retained answer" (point-min) (point-max))))
+    (should (string-match-p "^\\* Current\n\\*\\* User" (buffer-string)))))
+
+(ert-deftest llemar-test-compaction-resume-keeps-local-archive ()
+  "Resume reconciles local archived source with authoritative pi entries."
+  (let ((llemar-session-directory (make-temp-file "llemar-archives" t)))
+    (unwind-protect
+        (progn
+          (llemar-test-with-conversation "compact-manual" "go"
+            (llemar-compact)
+            (llemar-test--settle)
+            (should (llemar-test--wait
+                     (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+            (goto-char (point-min))
+            (search-forward "Original answer")
+            (replace-match "Locally annotated original")
+            (goto-char (point-max))
+            (insert "Draft for later\n")
+            (llemar--save-transcript))
+          (let* ((llemar-executable llemar-test-mock)
+                 (llemar-extra-args '("compact-resume"))
+                 (buffer (llemar--resume-conversation llemar-test-directory "saved")))
+            (unwind-protect
+                (with-current-buffer buffer
+                  (should (llemar-test--wait
+                           (lambda () (string-match-p "Locally annotated original" (buffer-string)))
+                           llemar--process))
+                  (should (string-match-p "Draft for later" (buffer-string))))
+              (kill-buffer buffer))))
+      (delete-directory llemar-session-directory t))))
+
+(ert-deftest llemar-test-compaction-auto-continues ()
+  "Automatic compaction preserves in-flight output and opens just one prompt."
+  (llemar-test-with-conversation "compact-auto" "go"
+    (should (llemar-test--wait
+             (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+    (should (string-match-p "Continued after compaction" (buffer-string)))
+    (should (= 2 (cl-count "User" (llemar-test--headings) :test #'equal)))
+    (should-not llemar--busy)
+    (should-not llemar--status)))
+
+(ert-deftest llemar-test-compaction-before-prompt ()
+  "Pre-prompt compaction must not archive a prompt pi has not consumed yet."
+  (llemar-test-with-conversation "compact-before" "go"
+    (goto-char (point-max))
+    (insert "next prompt\n")
+    (llemar-send)
+    (llemar-test--settle)
+    (should (llemar-test--wait
+             (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+    (llemar-test--goto "^\\* Current$")
+    (should (search-forward "next prompt" nil t))
+    (should (search-forward "Answered next prompt" nil t))))
+
+(ert-deftest llemar-test-compaction-retain-none-continues ()
+  "A retain-none boundary stops before output generated after compaction."
+  (llemar-test-with-conversation "compact-auto-none" "go"
+    (should (llemar-test--wait
+             (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+    (llemar-test--goto "^\\* Current$")
+    (should (search-forward "Continued after compaction" nil t))))
+
+(ert-deftest llemar-test-compaction-failure-keeps-source ()
+  "Failure and cancellation do not archive any source."
+  (dolist (scenario '("compact-fail" "compact-cancel"))
+    (llemar-test-with-conversation scenario "go"
+      (goto-char (point-max))
+      (insert "unsent draft\n")
+      (llemar-compact)
+      (llemar-test--settle)
+      (should (equal (string-trim (buffer-substring-no-properties
+                                   (car (llemar--last-prompt-bounds)) (point-max)))
+                     "unsent draft"))
+      (should-not (member "Source" (llemar-test--headings)))
+      (should (string-match-p "Original answer" (buffer-string)))
+      (should-not llemar--status))))
+
+(ert-deftest llemar-test-compaction-resume-from-entries ()
+  "Raw session entries recover source, summary, and retained history."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("compact-resume"))
+         (buffer (llemar--resume-conversation llemar-test-directory "saved")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (llemar-test--wait
+                   (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+          (should (string-match-p "Original answer" (buffer-string)))
+          (should (string-match-p "^\\*\\* Assistant\nRetained answer" (buffer-string))))
+      (kill-buffer buffer))))
 
 ;;;; Session events
 
@@ -744,7 +893,7 @@ They are distinct values on the wire and must not collapse together."
                    llemar--process))
           ;; The system message is skipped; each turn is its own heading.
           (should (equal (llemar-test--headings)
-                         '("User" "Assistant" "bash" "Assistant" "User")))
+                         '("Current" "User" "Assistant" "bash" "Assistant" "User")))
           (should (string-match-p "Summarise the repo" (buffer-string)))
           (should (string-match-p "README.md" (buffer-string)))
           (should (string-match-p "^:THINKING:$" (buffer-string)))

@@ -139,6 +139,15 @@ A window scrolled up to read earlier output is left undisturbed."
 (defvar-local llemar--request-counter 0
   "Counter used to mint unique RPC request ids.")
 
+(defvar-local llemar--message-markers nil
+  "Message identities mapped to their rendered heading markers.")
+
+(defvar-local llemar--pending-user-marker nil
+  "Heading of a submitted prompt not yet consumed by pi.")
+
+(defvar-local llemar--compacting nil
+  "Non-nil while a compaction command or event is in progress.")
+
 (defvar-local llemar--busy nil
   "Non-nil while the agent is running.")
 
@@ -378,7 +387,8 @@ resume that session file or id."
       (with-current-buffer conversation
         (when (and (eq process llemar--process) (not (process-live-p process)))
           (llemar--cancel-displays)
-          (setq llemar--busy nil)
+          (setq llemar--busy nil llemar--compacting nil
+                llemar--pending-user-marker nil)
           (llemar--set-status "dead")
           (llemar--note (format "pi process %s" (string-trim event))))))))
 
@@ -610,7 +620,7 @@ blank line after the heading keeps this call\='s marker strictly before
 the shared insertion marker so the two cannot be confused."
   (or (gethash tool-call-id llemar--tool-markers)
       (let ((marker (llemar--marker)))
-        (llemar--insert-heading marker 2 (or tool-name "tool"))
+        (llemar--insert-heading marker 3 (or tool-name "tool"))
         (let ((section (marker-position marker)))
           (save-excursion (goto-char marker) (insert "\n"))
           (let ((own (copy-marker section t)))
@@ -819,11 +829,17 @@ RAW is the JSON line RECORD was parsed from."
      (clrhash llemar--streamed-blocks)
      (llemar--set-status "thinking"))
     ("message_start"
-     (let ((role (alist-get 'role (alist-get 'message record))))
+     (let* ((message (alist-get 'message record))
+            (role (alist-get 'role message)))
        (when (equal role "assistant")
          ;; Content indices restart with each message.
          (clrhash llemar--streamed-blocks)
-         (llemar--open-assistant))))
+         (llemar--open-assistant))
+       (llemar--remember-message message)
+       (when (equal role "user")
+         (when llemar--pending-user-marker
+           (set-marker llemar--pending-user-marker nil))
+         (setq llemar--pending-user-marker nil))))
     ("message_update"
      (llemar--handle-message-update (alist-get 'assistantMessageEvent record) raw))
     ("tool_execution_start"
@@ -837,7 +853,9 @@ RAW is the JSON line RECORD was parsed from."
        (llemar--queue-display record))
      (llemar--set-status "thinking"))
     ("agent_settled"
-     (setq llemar--busy nil)
+     (when llemar--pending-user-marker
+       (set-marker llemar--pending-user-marker nil))
+     (setq llemar--busy nil llemar--pending-user-marker nil)
      (llemar--set-status nil)
      (when (alist-get 'aborted record)
        (llemar--note "aborted"))
@@ -855,17 +873,20 @@ RAW is the JSON line RECORD was parsed from."
        (llemar--note (format "retries exhausted: %s"
                              (or (alist-get 'finalError record) "")))))
     ("compaction_start"
+     (setq llemar--compacting t)
      (llemar--set-status "compacting"))
     ("compaction_end"
-     (llemar--set-status "thinking")
-     (let ((result (alist-get 'result record)))
+     (setq llemar--compacting nil)
+     (when (equal (alist-get 'reason record) "manual")
+       (setq llemar--busy nil))
+     (llemar--set-status (when llemar--busy "thinking"))
+     (if-let* ((result (alist-get 'result record)))
+         (llemar--fetch-compaction result)
        (llemar--note
-        (if result
-            (format "compacted: %s tokens -> %s"
-                    (alist-get 'tokensBefore result)
-                    (alist-get 'estimatedTokensAfter result))
-          (format "compaction did not complete: %s"
-                  (or (alist-get 'errorMessage record) "aborted"))))))
+        (format "compaction did not complete: %s"
+                (if (alist-get 'aborted record) "aborted"
+                  (or (alist-get 'errorMessage record) "unknown error"))))
+       (llemar--save-transcript)))
     ("extension_error"
      (llemar--log (current-buffer)
                   (format "extension error in %s (%s): %s"
@@ -885,7 +906,7 @@ Every assistant message gets its own heading.  That keeps tool calls
 nested under the turn that made them, and means prose the agent emits
 after a tool result starts a new turn instead of landing inside the
 tool\='s subtree."
-  (llemar--insert-heading (llemar--marker) 1 llemar-assistant-heading))
+  (llemar--insert-heading (llemar--marker) 2 llemar-assistant-heading))
 
 (defun llemar--handle-message-update (event &optional raw)
   "Render a streaming assistant message EVENT.
@@ -1009,7 +1030,7 @@ headings."
   (pcase (alist-get 'role message)
     ("user"
      (let ((marker (llemar--marker)))
-       (llemar--insert-heading marker 1 llemar-user-heading)
+       (llemar--insert-heading marker 2 llemar-user-heading)
        (llemar--insert marker
                        (string-trim-right
                         (llemar--message-text (alist-get 'content message))))))
@@ -1035,7 +1056,127 @@ headings."
         (isError . ,(alist-get 'isError message))
         (result . ((content . ,(alist-get 'content message))
                    (details . ,(alist-get 'details message)))))))
-    (_ nil)))
+    (_ nil))
+  (llemar--remember-message message))
+
+;;;; Compaction archives
+
+(defun llemar--message-key (message)
+  "Return a stable rendering identity for MESSAGE, or nil."
+  (when (alist-get 'timestamp message)
+    (list (alist-get 'role message) (alist-get 'timestamp message))))
+
+(defun llemar--remember-message (message)
+  "Associate MESSAGE with its rendered user or assistant heading."
+  (let ((role (alist-get 'role message))
+        (key (llemar--message-key message)))
+    (when (and key (member role '("user" "assistant")))
+      (save-excursion
+        (goto-char (llemar--marker))
+        (when (re-search-backward
+               (format "^\\*\\* %s[ \t]*$"
+                       (regexp-quote (if (equal role "user")
+                                         llemar-user-heading
+                                       llemar-assistant-heading))) nil t)
+          (puthash key (copy-marker (line-beginning-position) t)
+                   llemar--message-markers))))))
+
+(defun llemar--branch-entries (data)
+  "Return DATA's entries on the active branch, oldest first."
+  (let ((table (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal))
+        (id (alist-get 'leafId data))
+        branch)
+    (dolist (entry (alist-get 'entries data))
+      (puthash (alist-get 'id entry) entry table))
+    (while (and id (not (gethash id seen)) (gethash id table))
+      (puthash id t seen)
+      (let ((entry (gethash id table)))
+        (push entry branch)
+        (setq id (alist-get 'parentId entry))))
+    branch))
+
+(defun llemar--fetch-compaction (result)
+  "Fetch pi's authoritative boundary and timestamp for compaction RESULT."
+  (let ((source-end (copy-marker (or llemar--pending-user-marker
+                                     (llemar--marker)))))
+    (llemar--send
+     '((type . "get_entries"))
+     (lambda (response)
+       (let* ((entries (llemar--branch-entries (alist-get 'data response)))
+              (entry (seq-find
+                      (lambda (item)
+                        (and (equal (alist-get 'type item) "compaction")
+                             (equal (alist-get 'summary item) (alist-get 'summary result))
+                             (equal (alist-get 'firstKeptEntryId item)
+                                    (alist-get 'firstKeptEntryId result))))
+                      (reverse entries))))
+         (unwind-protect
+             (progn
+               (llemar--archive-compaction (or entry result) entries source-end)
+               (llemar--save-transcript))
+           (set-marker source-end nil)))))))
+
+(defun llemar--archive-compaction (entry entries &optional source-end)
+  "Archive the source prefix described by compaction ENTRY in ENTRIES.
+SOURCE-END bounds a live retain-none compaction before continued generation.
+Use only a known message boundary; if it is unavailable, keep the transcript
+untouched and show the actual summary with an explicit limitation."
+  (let* ((kept-id (alist-get 'firstKeptEntryId entry))
+         (kept (seq-find (lambda (item) (equal (alist-get 'id item) kept-id)) entries))
+         (boundary (gethash (llemar--message-key (alist-get 'message kept))
+                            llemar--message-markers))
+         (summary (alist-get 'summary entry))
+         (current (save-excursion
+                    (goto-char (point-max))
+                    (when (re-search-backward "^\\* Current$" nil t)
+                      (copy-marker (line-beginning-position))))))
+    ;; A retain-none compaction points to itself.  An unsent prompt is local
+    ;; input, not part of the compacted source, and must stay under Current.
+    (when (equal kept-id (alist-get 'id entry))
+      (setq boundary
+            (or source-end
+                (copy-marker (llemar--marker)))))
+    (if (not (and current boundary (stringp summary)
+                  (> boundary current)))
+        (progn
+          (llemar--note "compaction succeeded; exact source boundary unavailable; transcript not reorganized")
+          (when (stringp summary)
+            (llemar--insert-block (llemar--marker) "#+begin_example" summary)))
+      (let ((inhibit-read-only t)
+            (end (copy-marker boundary t))
+            (timestamp (alist-get 'timestamp entry)))
+        (save-excursion
+          ;; Demote only actual headlines.  Escaped output stays byte-for-byte
+          ;; intact, and live markers continue to track retained tool output.
+          (goto-char current)
+          (forward-line 1)
+          (while (re-search-forward "^\\*+ " end t)
+            (goto-char (match-beginning 0))
+            (insert "*")
+            (forward-line 1))
+          (goto-char current)
+          (delete-region (point) (line-end-position))
+          (insert "* Compacted "
+                  (if timestamp
+                      (format-time-string "%Y-%m-%d %H:%M:%S %z"
+                                          (date-to-time timestamp) t)
+                    (format-time-string "%Y-%m-%d %H:%M:%S %z" nil t)))
+          (forward-line 1)
+          (when (alist-get 'id entry)
+            (insert ":PROPERTIES:\n:LLEMAR_COMPACTION_ID: "
+                    (alist-get 'id entry) "\n:END:\n"))
+          (insert "** Source\n")
+          (goto-char end)
+          ;; Boundary markers must follow these insertions to the retained
+          ;; heading, but this temporary insertion marker advances independently.
+          (let ((marker (copy-marker (point) t)))
+            (llemar--insert-heading marker 2 "Summary")
+            (llemar--insert-block marker "#+begin_example" summary)
+            (llemar--insert-heading marker 1 "Current")
+            (set-marker marker nil)))
+        (set-marker end nil)))
+    (when current (set-marker current nil))))
 
 (defun llemar--replay-messages (messages)
   "Render saved MESSAGES into this buffer in order."
@@ -1043,25 +1184,85 @@ headings."
     (llemar--replay-message message)))
 
 (defun llemar--load-session ()
-  "Fetch the resumed session's messages from pi and render them.
-A fresh user prompt is left at the end, ready to continue the session."
+  "Reconstruct the active branch, including pre-compaction source, from pi."
   (llemar--send
-   '((type . "get_messages"))
+   '((type . "get_entries"))
    (lambda (response)
-     (when (alist-get 'success response)
-       (llemar--release-tool-markers)
-       (clrhash llemar--streamed-blocks)
-       (llemar--replay-messages
-        (alist-get 'messages (alist-get 'data response)))
-       (llemar--open-user-prompt)
-       (llemar--save-transcript)
-       (llemar--set-status nil)))))
+     (let* ((data (alist-get 'data response))
+            (entries (llemar--branch-entries data)))
+       (if entries
+           (progn
+             (dolist (entry entries)
+               (pcase (alist-get 'type entry)
+                 ("message" (llemar--replay-message (alist-get 'message entry)))
+                 ("compaction" (llemar--archive-compaction entry entries))))
+             (llemar--finish-history))
+         ;; Older backends may not expose raw entries.  Do not pretend their
+         ;; context-only history contains the original pre-compaction source.
+         (llemar--send
+          '((type . "get_messages"))
+          (lambda (messages-response)
+            (when (alist-get 'success messages-response)
+              (llemar--replay-messages
+               (alist-get 'messages (alist-get 'data messages-response)))
+              (llemar--note "raw session history unavailable; compacted source may be missing")
+              (llemar--finish-history)))))))))
+
+(defun llemar--finish-history ()
+  "Finish loading history and prepare for another prompt."
+  (llemar--open-user-prompt)
+  (llemar--restore-local-archives)
+  (llemar--save-transcript)
+  (llemar--set-status nil))
+
+(defun llemar--archive-regions ()
+  "Return (ID START END) for this buffer's compaction subtrees, last first."
+  (let (regions)
+    (org-map-entries
+     (lambda ()
+       (when-let* ((id (org-entry-get nil "LLEMAR_COMPACTION_ID")))
+         (when (= (org-outline-level) 1)
+           (push (list id (point) (save-excursion (org-end-of-subtree t t)))
+                 regions)))))
+    regions))
+
+(defun llemar--restore-local-archives ()
+  "Reconcile saved local archives with compaction IDs on pi's active branch.
+Only confirmed compaction subtrees are reused, never backend context.  This
+preserves local annotations and richer historical rendering without importing
+an abandoned branch.  A trailing unsent draft is restored with those archives."
+  (when llemar--session-id
+    (let ((file (expand-file-name
+                 (concat (secure-hash 'sha256 llemar--session-id) ".org")
+                 llemar-session-directory))
+          (archives (make-hash-table :test #'equal))
+          draft restored)
+      (when (file-readable-p file)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (org-mode)
+          (dolist (region (llemar--archive-regions))
+            (puthash (car region)
+                     (buffer-substring-no-properties (nth 1 region) (nth 2 region))
+                     archives))
+          (when-let* ((bounds (llemar--last-prompt-bounds)))
+            (when (= (cdr bounds) (point-max))
+              (setq draft (buffer-substring-no-properties (car bounds) (cdr bounds))))))
+        (dolist (region (llemar--archive-regions))
+          (when-let* ((text (gethash (car region) archives)))
+            (save-excursion
+              (goto-char (nth 1 region))
+              (delete-region (nth 1 region) (nth 2 region))
+              (insert text))
+            (setq restored t)))
+        (when (and restored draft)
+          (save-excursion (goto-char (point-max)) (insert draft)))))))
 
 ;;;; Prompt handling
 
 (defun llemar--user-heading-regexp ()
-  "Return a regexp matching a top level user heading."
-  (format "^\\* %s[ \t]*$" (regexp-quote llemar-user-heading)))
+  "Return a regexp matching a current user heading."
+  (format "^\\*\\* %s[ \t]*$" (regexp-quote llemar-user-heading)))
 
 (defun llemar--last-prompt-bounds ()
   "Return (START . END) of the body under the last user heading, or nil."
@@ -1081,7 +1282,7 @@ A fresh user prompt is left at the end, ready to continue the session."
     (llemar--insert-newline marker)
     (save-excursion
       (goto-char marker)
-      (insert "\n* " llemar-user-heading "\n"))
+      (insert "\n** " llemar-user-heading "\n"))
     (when (eq (current-buffer) (window-buffer (selected-window)))
       (goto-char (point-max)))))
 
@@ -1189,16 +1390,17 @@ Unless NO-PROMPT is non-nil, also add an empty trailing user heading.
 Resuming suppresses it, then adds one after the history is rendered."
   (insert (format "#+title: llemar %s\n#+startup: hideblocks\n\n"
                   (format-time-string "%Y-%m-%d %H:%M")))
+  (insert "* Current\n")
   (unless no-prompt
-    (insert "* " llemar-user-heading "\n")))
+    (insert "** " llemar-user-heading "\n")))
 
 (defun llemar-send ()
   "Send the prompt under the last user heading to the agent."
   (interactive)
-  (when llemar--busy
+  (when (or llemar--busy llemar--compacting)
     (user-error "Agent is running; use `llemar-steer' or `llemar-abort'"))
   (let* ((bounds (or (llemar--last-prompt-bounds)
-                     (user-error "No `* %s' heading to send"
+                     (user-error "No `** %s' heading to send"
                                  llemar-user-heading)))
          (text (string-trim (buffer-substring-no-properties
                              (car bounds) (cdr bounds)))))
@@ -1212,6 +1414,9 @@ Resuming suppresses it, then adds one after the history is rendered."
       (llemar--registry-put llemar--session-id
                             :label (llemar--one-line text 72)))
     (llemar--save-transcript)
+    (setq llemar--pending-user-marker
+          (copy-marker (save-excursion
+                         (goto-char (car bounds)) (forward-line -1) (point)) t))
     (set-marker (llemar--marker) (point-max))
     (llemar--release-tool-markers)
     (clrhash llemar--streamed-blocks)
@@ -1220,8 +1425,42 @@ Resuming suppresses it, then adds one after the history is rendered."
     (llemar--send `((type . "prompt") (message . ,text))
                   (lambda (response)
                     (unless (alist-get 'success response)
-                      (setq llemar--busy nil)
+                      (when llemar--pending-user-marker
+                        (set-marker llemar--pending-user-marker nil))
+                      (setq llemar--busy nil llemar--pending-user-marker nil)
                       (llemar--set-status nil))))))
+
+(defun llemar-compact (&optional custom-instructions)
+  "Compact context on demand, optionally using CUSTOM-INSTRUCTIONS.
+With a prefix argument, prompt for instructions.  The original transcript
+is preserved; pi alone decides the summary and retained context boundary.
+Wait for the current run to settle before requesting manual compaction."
+  (interactive (list (when current-prefix-arg
+                       (read-string "Compaction instructions: "))))
+  (unless (derived-mode-p 'llemar-mode)
+    (user-error "Not a Llemar conversation"))
+  (when (or llemar--busy llemar--compacting)
+    (user-error "Agent is busy; wait or abort before compacting"))
+  (unless (llemar--process-live-p)
+    (user-error "No live pi process"))
+  ;; Status/error notes belong before the local draft, not in its body.
+  (when-let* ((bounds (llemar--last-prompt-bounds)))
+    (set-marker (llemar--marker)
+                (save-excursion
+                  (goto-char (car bounds)) (forward-line -1) (point))))
+  (setq llemar--busy t llemar--compacting t)
+  (llemar--set-status "compacting")
+  (llemar--send
+   (append '((type . "compact"))
+           (when (and custom-instructions
+                      (not (string-empty-p custom-instructions)))
+             `((customInstructions . ,custom-instructions))))
+   (lambda (_response)
+     ;; Manual compact has no agent_settled event.  Its terminal response
+     ;; also covers errors that happen before compaction_start.
+     (setq llemar--busy nil llemar--compacting nil)
+     (llemar--set-status nil)
+     (llemar--save-transcript))))
 
 (defun llemar-abort ()
   "Abort the agent's current run."
@@ -1255,7 +1494,9 @@ Resuming suppresses it, then adds one after the history is rendered."
          (let ((inhibit-read-only t))
            (llemar--cancel-displays)
            (erase-buffer)
-           (setq llemar--busy nil)
+           (setq llemar--busy nil llemar--compacting nil
+                 llemar--pending-user-marker nil)
+           (clrhash llemar--message-markers)
            (llemar--release-tool-markers)
            (clrhash llemar--streamed-blocks)
            (set-marker (llemar--marker) (point-max))
@@ -1272,7 +1513,9 @@ Resuming suppresses it, then adds one after the history is rendered."
     ;; Closing stdin asks pi to shut down in an orderly way.
     (process-send-eof llemar--process)
     (delete-process llemar--process))
-  (setq llemar--busy nil)
+  (setq llemar--busy nil llemar--compacting nil
+        llemar--pending-user-marker nil)
+  (clrhash llemar--message-markers)
   (llemar--start-process)
   (message "llemar: pi restarted"))
 
@@ -1301,6 +1544,7 @@ Resuming suppresses it, then adds one after the history is rendered."
   :doc "Keymap for `llemar-mode'."
   "C-c C-c" #'llemar-send
   "C-c C-k" #'llemar-abort
+  "C-c C-m" #'llemar-compact
   "C-c C-s" #'llemar-steer
   "C-c C-n" #'llemar-new-session
   "C-c C-r" #'llemar-restart
@@ -1312,6 +1556,7 @@ Resuming suppresses it, then adds one after the history is rendered."
   "Major mode for conversing with a pi agent in an org buffer.
 
 \\{llemar-mode-map}"
+  (setq llemar--message-markers (make-hash-table :test #'equal))
   (setq llemar--tool-markers (make-hash-table :test #'equal))
   (setq llemar--callbacks (make-hash-table :test #'equal))
   (setq llemar--streamed-blocks (make-hash-table :test #'equal))

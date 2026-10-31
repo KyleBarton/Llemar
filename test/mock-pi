@@ -221,6 +221,73 @@ def scenario_retry():
     settle()
 
 
+COMPACTION_ENTRIES = []
+
+
+def compaction_result():
+    return {"summary": "Remember the old exchange.\n* not a heading",
+            "firstKeptEntryId": "kept", "tokensBefore": 150000,
+            "estimatedTokensAfter": 32000}
+
+
+def compact_event(reason):
+    emit({"type": "compaction_start", "reason": reason})
+    result = compaction_result()
+    count = sum(entry["type"] == "compaction" for entry in COMPACTION_ENTRIES)
+    entry_id = f"compact-{count + 1}"
+    if scenario_name == "compact-unknown":
+        result["firstKeptEntryId"] = "unavailable-boundary"
+    if count or scenario_name in ("compact-auto-none", "compact-before"):
+        result["firstKeptEntryId"] = entry_id  # Retain none on the second pass.
+    COMPACTION_ENTRIES.append(dict(result, type="compaction", id=entry_id,
+                                   parentId=COMPACTION_ENTRIES[-1]["id"],
+                                   timestamp="2026-01-02T03:04:05Z"))
+    emit({"type": "compaction_end", "reason": reason, "result": result,
+          "aborted": False, "willRetry": reason == "overflow"})
+    return result
+
+
+def scenario_compaction():
+    if scenario_name == "compact-before" and COMPACTION_ENTRIES:
+        compact_event("threshold")
+        emit({"type": "agent_start"})
+        message = {"role": "user", "timestamp": 201, "content": "next prompt"}
+        emit({"type": "message_start", "message": message})
+        begin()
+        assistant_text(["Answered next prompt.\n"])
+        settle()
+        return
+    emit({"type": "agent_start"})
+    for entry_id, role, text, timestamp in [
+            ("old", "user", "go", 101),
+            ("answer", "assistant", "Original answer.\n", 102),
+            ("kept", "assistant", "Retained answer.\n", 103)]:
+        message = {"role": role, "timestamp": timestamp,
+                   "content": text if role == "user" else [{"type": "text", "text": text}]}
+        COMPACTION_ENTRIES.append({"type": "message", "id": entry_id,
+                                   "parentId": COMPACTION_ENTRIES[-1]["id"] if COMPACTION_ENTRIES else None,
+                                   "message": message})
+        emit({"type": "message_start", "message": message})
+        if role == "assistant":
+            assistant_text([text])
+        if entry_id == "answer":
+            message["content"].append({"type": "toolCall", "id": "archive-tool",
+                                       "name": "bash", "arguments": {"command": "ls"}})
+            tool_call("archive-tool", "bash", {"command": "ls"}, 1)
+            tool_result("archive-tool", "bash", HOSTILE_OUTPUT)
+        emit({"type": "message_end", "message": message})
+        if entry_id == "answer":
+            COMPACTION_ENTRIES.append({"type": "message", "id": "tool-result",
+                                       "parentId": "answer",
+                                       "message": {"role": "toolResult", "toolCallId": "archive-tool",
+                                                   "toolName": "bash", "timestamp": 102.5,
+                                                   "content": [{"type": "text", "text": HOSTILE_OUTPUT}]}})
+    if scenario_name in ("compact-auto", "compact-auto-none"):
+        compact_event("overflow")
+        assistant_text(["Continued after compaction.\n"])
+    settle()
+
+
 def scenario_hang():
     emit({"type": "agent_start"})
 
@@ -269,6 +336,14 @@ def scenario_open_buffer():
 
 
 SCENARIOS = {
+    "compact-manual": scenario_compaction,
+    "compact-auto": scenario_compaction,
+    "compact-auto-none": scenario_compaction,
+    "compact-unknown": scenario_compaction,
+    "compact-before": scenario_compaction,
+    "compact-fail": scenario_compaction,
+    "compact-cancel": scenario_compaction,
+    "compact-resume": scenario_compaction,
     "write": scenario_write,
     "write-results": scenario_write_results,
     "edit": scenario_edit,
@@ -291,7 +366,17 @@ MESSAGE_SCRIPTS = {
 
 
 def main():
+    global scenario_name
     scenario = next((a for a in sys.argv[1:] if a in SCENARIOS), "basic")
+    scenario_name = scenario
+    if scenario == "compact-resume":
+        # Reuse the deterministic history builder, suppressing live events.
+        global emit
+        original_emit = emit
+        emit = lambda record: None
+        scenario_compaction()
+        compact_event("manual")
+        emit = original_emit
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -312,6 +397,21 @@ def main():
                            "isStreaming": False, "messageCount": 2,
                            "sessionId": "mock-123",
                            "sessionFile": "/tmp/mock-session.jsonl"}})
+        elif kind == "compact":
+            if scenario in ("compact-fail", "compact-cancel"):
+                emit({"type": "compaction_start", "reason": "manual"})
+                emit({"type": "compaction_end", "reason": "manual",
+                      "aborted": scenario == "compact-cancel", "errorMessage": "Cannot compact"})
+                emit({"id": request, "type": "response", "command": kind,
+                      "success": False, "error": "Cannot compact"})
+            else:
+                result = compact_event("manual")
+                emit({"id": request, "type": "response", "command": kind,
+                      "success": True, "data": result})
+        elif kind == "get_entries":
+            emit({"id": request, "type": "response", "command": kind,
+                  "success": True, "data": {"entries": COMPACTION_ENTRIES,
+                  "leafId": COMPACTION_ENTRIES[-1]["id"] if COMPACTION_ENTRIES else None}})
         elif kind == "get_messages":
             builder = MESSAGE_SCRIPTS.get(scenario)
             emit({"id": request, "type": "response", "command": "get_messages",
