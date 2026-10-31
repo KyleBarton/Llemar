@@ -1,0 +1,101 @@
+#+title: Preserve and organize conversation history across compaction
+
+* Goal
+Treat compaction as a visible transition in the conversation, not as a reason
+to discard the original transcript. Pi's session state is authoritative for the
+model's context and for resuming; the Llemar Org buffer is a richer, readable
+record and need not mirror the active context window.
+
+* Desired behavior
+Start every new conversation under a top-level =Current= heading, with =User=,
+=Assistant=, and other conversation headings nested beneath it from the outset.
+Do not introduce this nesting only after the first compaction; keep the active
+conversation's structure consistent throughout the session.
+
+When pi compacts a conversation, wrap the compacted portion in a timestamped
+=Compacted= heading with two children:
+- =Source=: the original conversation, preserved beneath appropriately demoted
+  headings, including tool output and other existing transcript content.
+- =Summary=: the actual compaction summary retained by pi for the new context.
+
+Continue the active conversation under a =Current= heading, with the next user
+prompt ready for input when the agent is waiting for the user. Automatic
+compaction must not interrupt an ongoing run just to create a new prompt.
+
+For example, an initial transcript:
+
+#+begin_example
+* Current
+** User
+   ...
+** Assistant
+   ...
+** User
+   ...
+#+end_example
+
+becomes:
+
+#+begin_example
+* Compacted <timestamp>
+** Source
+*** User
+    ...
+*** Assistant
+    ...
+*** User
+    ...
+** Summary
+    <the summary preserved in pi's new context window>
+* Current
+** User
+    <await prompt here>
+#+end_example
+
+The source remains available for inspection even though it is no longer part
+of the model's active context. Subsequent compactions should preserve earlier
+source and summary records rather than overwrite them.
+
+* Implementation guidance
+- Use pi's compaction events and session data as the source of truth. Llemar
+  presents compaction; it does not implement a second context-management system.
+- Determine which messages were actually compacted. Do not imply that retained
+  recent messages were removed from context; keep those in the current section.
+- Show the summary pi actually retained, not an independently generated one.
+  If the summary or boundary is unavailable, report that limitation honestly.
+- Reorganize the transcript only after confirmed successful compaction. Handle
+  progress, failure, and cancellation without losing or duplicating content.
+- Preserve Org structure, source-block escaping, tool subtrees, and the working
+  input area when wrapping and demoting existing conversation headings.
+- Preserve this richer representation in saved Org transcripts. Reconcile it
+  with pi's authoritative history on resume without treating the Org preview
+  as backend session state or silently discarding locally preserved source.
+- Coordinate compact status indicators with [[file:agent-state-visibility.org][agent-state visibility]]; the
+  transcript structure provides the detailed record rather than routine noise.
+
+* Acceptance criteria
+- New conversations start with a top-level =Current= heading and nested message
+  headings, including the initial user prompt, before any compaction occurs.
+- Successful compaction produces timestamped =Compacted=, =Source=, =Summary=,
+  and =Current= sections following the structure above.
+- Original compacted messages remain readable, and the displayed summary
+  matches pi's retained summary.
+- Messages retained in context and new messages appear in the current section.
+- Repeated compactions preserve prior records without duplicating source text.
+- In-flight output and unsent input survive the transition; failed or cancelled
+  compaction does not archive messages as if compaction succeeded.
+- Saved transcripts and resumed conversations preserve available compaction
+  records, with explicit limitations when source history cannot be recovered.
+- Deterministic offline scenarios in =test/mock-pi= cover the initial =Current=
+  structure, successful automatic compaction, failure/cancellation, repeated
+  compaction, continued generation, and resume. No real model calls are required.
+
+* Open questions
+- Which pi events or session records expose the summary, timestamp, and exact
+  compacted/retained boundary, both live and on resume?
+- Should repeated compactions form sibling archive sections or nest previous
+  records, and how should retained messages be represented without duplication?
+- Should archived source start folded while its summary remains visible?
+- How much source can be reconstructed on resume without a saved Org transcript?
+- Should explicitly requested compaction use the same presentation? Ideally,
+  the representation should be consistent regardless of what triggered it.

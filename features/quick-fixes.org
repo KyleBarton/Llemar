@@ -8,3 +8,18 @@ Successful writes should display a syntax-highlighted Org =diff= source block,
 expanded by default and kept complete regardless of the tool-result line cap,
 consistent with edit diffs. Include coverage for both live output and resumed
 history using deterministic offline tests.
+
+* TODO Fully minimize tool-use headings by default
+Ideally, tool-use Org headings should start fully folded, hiding their entire
+subtree rather than leaving nested headings visible. Keep manual expansion
+available, and cover both live output and resumed history.
+
+* TODO Add a non-replacing conversation command
+Provide an alternate command, tentatively =llemar-open-also=, that starts a new
+conversation without replacing an existing Llemar buffer. Keep the usual
+=llemar= replacement behavior unchanged. Unlike =llemar-other-window=, this
+should not require opening another window; preserve the old conversation and
+its process while displaying the new one in the current window.
+
+Confirm naming and whether the existing command can share the implementation.
+Cover invocation from both Llemar and non-Llemar buffers with offline tests.

@@ -1,0 +1,73 @@
+#+title: Remote pi sessions over TRAMP
+
+* Goal
+Support Llemar conversations backed by pi running on a remote host, with Emacs
+accessing that host's project filesystem through TRAMP. Keep the Org conversation
+buffer and user interface in the local Emacs instance while the agent and its
+tools operate in the remote environment.
+
+* Primary scenario
+- The user visits a project through a TRAMP path such as
+  =/ssh:user@host:/path/to/project/=.
+- Starting Llemar for that project launches =pi --mode rpc= on the remote host,
+  with the remote project directory as its working directory.
+- Llemar exchanges RPC commands and events with that remote process and renders
+  the conversation locally, as it does for a local backend.
+- Files referenced by the agent can be visited in Emacs through the matching
+  TRAMP connection, rather than accidentally resolving against local files.
+
+* Desired behavior
+- Infer the remote execution context from the selected working directory,
+  preserving the TRAMP method, user, host, and any connection hops.
+- Run pi and its tools remotely; do not start a local backend against a remote
+  project's TRAMP pathname.
+- Use paths native to the remote host in backend requests and tool arguments.
+  Use TRAMP-qualified paths for Emacs-side file access and navigation.
+- Make the remote host and working directory apparent in conversation identity
+  and session selection, especially when local and remote projects share names.
+- Support starting, conversing, aborting, closing, and resuming remote sessions.
+- Keep local conversations working unchanged and allow local and remote
+  conversations to coexist.
+
+* Implementation guidance
+- Use Emacs's TRAMP-aware process and file facilities rather than building a
+  separate SSH transport or authentication system.
+- Keep pi responsible for agent execution, context management, and authoritative
+  session history on the remote host.
+- Distinguish remote backend session paths from Emacs-side paths and saved Org
+  transcript paths. Record enough connection identity to resume on the correct
+  host; do not conflate equal project paths or session IDs across hosts.
+- Resolve agent-provided relative paths against the remote working directory.
+  Route file-opening integrations through that conversation's remote context.
+- Handle remote executable discovery and noninteractive shell environments
+  explicitly; report missing pi or startup failures with useful diagnostics.
+- Handle authentication failures, disconnects, and remote process death without
+  losing the visible transcript or unsent draft. Do not imply that reconnecting
+  automatically reattaches to a still-running RPC process unless supported.
+- Reuse TRAMP's credential handling; do not store credentials in session
+  metadata, transcripts, or diagnostic output.
+
+* Acceptance criteria
+- Starting Llemar from a TRAMP project runs pi on the intended remote host in
+  the intended remote directory, with working RPC streaming and tool results.
+- Agent file references open the corresponding remote files in Emacs, including
+  when an identical absolute pathname exists locally.
+- Remote session discovery and resume target the correct host and backend
+  history rather than the local pi session store.
+- Concurrent local and remote conversations keep their processes, paths, and
+  session identities separate.
+- Startup and connection failures are visible, preserve transcript and draft
+  content, and leave other conversations usable.
+- Automated tests remain free, offline, and deterministic: use mocked TRAMP
+  process/file boundaries and =test/mock-pi= scenarios rather than requiring
+  network access, SSH credentials, a remote server, or real model calls.
+
+* Open questions
+- How should users choose a remote working directory when not already visiting
+  a TRAMP project?
+- How should the remote pi executable and environment be configured when they
+  differ from the local setup?
+- How should the companion pi extension be made available on remote hosts?
+- Where should Org preview transcripts be saved for remote sessions, and how
+  should remote session discovery integrate with the existing local registry?
+- What recovery flow should be offered after a dropped TRAMP connection?
