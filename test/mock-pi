@@ -170,6 +170,47 @@ def scenario_edit():
     settle()
 
 
+WRITE_CALLS = [
+    ("write-ok", {"path": "example.el", "content": "first\nsecond\nthird\nlast  \n"}),
+    ("write-error", {"path": "failed.el", "content": "not written"}),
+    ("write-empty", {"path": "empty.el", "content": ""}),
+    ("write-hostile", {"path": "odd\n* not a heading", "content":
+                       "#+end_src\n* not a heading\n+already plus\n\n"}),
+    ("write-invalid", {"path": "invalid.el", "content": 42}),
+]
+
+
+def messages_write():
+    calls = [{"type": "toolCall", "id": call_id, "name": "write", "arguments": args}
+             for call_id, args in WRITE_CALLS]
+    messages = [{"role": "assistant", "content": calls}]
+    for call_id, _ in WRITE_CALLS:
+        messages.append({"role": "toolResult", "toolCallId": call_id,
+                         "toolName": "write", "isError": call_id == "write-error",
+                         "content": [{"type": "text", "text": call_id}],
+                         "details": None})
+    return messages
+
+
+def scenario_write():
+    begin()
+    for index, (call_id, args) in enumerate(WRITE_CALLS):
+        tool_call(call_id, "write", args, index)
+    end_message()
+    # No results in this scenario: rendering must not depend on success.
+    settle()
+
+
+def scenario_write_results():
+    begin()
+    for index, (call_id, args) in enumerate(WRITE_CALLS):
+        tool_call(call_id, "write", args, index)
+    end_message()
+    for call_id, _ in reversed(WRITE_CALLS):
+        tool_result(call_id, "write", call_id, is_error=call_id == "write-error")
+    settle()
+
+
 def scenario_retry():
     begin()
     emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
@@ -228,6 +269,8 @@ def scenario_open_buffer():
 
 
 SCENARIOS = {
+    "write": scenario_write,
+    "write-results": scenario_write_results,
     "edit": scenario_edit,
     "open-buffer": scenario_open_buffer,
     "basic": scenario_basic,
@@ -241,6 +284,7 @@ SCENARIOS = {
 }
 
 MESSAGE_SCRIPTS = {
+    "write": messages_write,
     "resume": messages_resume,
     "edit": messages_edit,
 }

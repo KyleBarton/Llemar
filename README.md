@@ -14,7 +14,8 @@ access, tools, and session history.
 - **Foldable tool output:** pretty-printed JSON arguments, result blocks, errors,
   and execution durations stay attached to the right call, even when parallel
   tools finish out of order.
-- **Inline edit diffs:** successful `edit` calls show pi's unified patch in a
+- **Inline file previews:** `edit` results show patches and `write` calls show
+  their proposed entire contents as additions in a
   syntax-highlighted Org `diff` source block, including in resumed history.
 - **Session resume:** choose a previously recorded Llemar session and continue
   with its saved transcript rendered in a new buffer.
@@ -114,10 +115,10 @@ applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
 
-### Edit diffs
+### Edit and write diffs
 
-A successful `edit` tool result includes the normal success message followed by
-pi's per-operation unified patch:
+Successful `edit` tool results include the normal success message followed by
+pi's unified patch:
 
 ```org
 #+begin_src diff
@@ -132,8 +133,22 @@ pi's per-operation unified patch:
 Org uses `diff-mode` highlighting when `org-src-fontify-natively` is enabled.
 Diffs are expanded by default, unlike other tool blocks; fold them with `TAB`.
 They are kept complete, regardless of the ordinary tool-result line cap.
-Failed edits and results without a patch retain their normal output. This
-currently covers the `edit` tool, not `write` or file changes made by shell commands.
+Failed edits and edit results without a patch retain their normal output.
+
+For `write` calls, Llemar replaces the JSON argument preview with the path and
+an expanded, additions-only `diff` block labeled **Proposed file contents
+(entire file)**. This shows all supplied content at call time, before success
+or failure is known. The normal result follows separately. It is not a
+before/after diff: overwrites do not show removed or unchanged lines, and even
+unchanged writes display their supplied contents. Empty files have an empty
+block; missing final newlines are indicated explicitly. Contents are not
+truncated and are not duplicated as escaped JSON.
+
+Both presentations work live and when replaying saved history. Write previews
+use only tool-call arguments: no extra filesystem reads, backend overrides, or
+stored patches are needed. Older sessions with saved write arguments also get
+the preview. Malformed arguments retain the normal JSON preview. File changes
+made by shell commands do not get diff blocks.
 
 ### Resuming a session
 
@@ -215,7 +230,7 @@ The tests drive `test/mock-pi`, a stand-in that speaks pi's RPC protocol and
 replays named event scripts, so the suite needs no model, no network, and costs
 nothing. Scenarios cover streaming and non-streaming turns, parallel tool calls
 with out-of-order results, org-hostile prose and tool output, retries, aborts,
-process death, session resume, and live and replayed edit diffs.
+process death, session resume, and live and replayed edit/write diffs.
 
 ## Configuration
 
@@ -223,7 +238,7 @@ process death, session resume, and live and replayed edit diffs.
 - `llemar-extra-args` — extra pi arguments, e.g. `("--model" "claude-opus-5")`
 - `llemar-buffer-name-function` — function used to name new conversation buffers
 - `llemar-max-tool-result-lines` — tool output line cap, default 100, nil for no cap;
-  edit diff blocks are not truncated
+  edit/write diff blocks are not truncated
 - `llemar-show-thinking` — render thinking into a `THINKING` drawer, default t
 - `llemar-fold-thinking` — collapse a thinking drawer once complete, default t
 - `llemar-fold-blocks` — collapse tool argument and result blocks, default t;

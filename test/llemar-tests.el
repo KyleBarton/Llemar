@@ -797,6 +797,71 @@ They are distinct values on the wire and must not collapse together."
           (llemar-test--assert-edit-diff))
       (kill-buffer buffer))))
 
+;;;; Write diffs
+
+(defun llemar-test--assert-write-diffs ()
+  "Assert complete, expanded proposed contents, without duplicate JSON."
+  (let ((blocks (org-element-map (org-element-parse-buffer) 'src-block
+                  (lambda (block)
+                    (when (equal (org-element-property :language block) "diff")
+                      block)))))
+    (should (= (length blocks) 4))
+    (should (equal (mapcar (lambda (block)
+                            (org-element-property :value block))
+                          blocks)
+                   '("+first\n+second\n+third\n+last  \n"
+                     "+not written\n\\ No newline at end of file\n"
+                     ""
+                     "+#+end_src\n+* not a heading\n++already plus\n+\n")))
+    (dolist (block blocks)
+      (goto-char (org-element-property :begin block))
+      (forward-line 1)
+      (should-not (llemar-test--folded-p (point)))
+      (org-back-to-heading t)
+      (should (equal (org-get-heading t t t t) "write"))))
+  (dolist (path '("example.el" "failed.el" "empty.el" "invalid.el"))
+    (should (string-match-p (regexp-quote path) (buffer-string))))
+  (should (= (how-many "Proposed file contents" (point-min) (point-max)) 4))
+  ;; Valid writes no longer duplicate their contents as escaped JSON strings.
+  (should (= (how-many "^#\\+begin_src json" (point-min) (point-max)) 1))
+  (should-not (member "not a heading" (llemar-test--headings)))
+  (should-not (string-match-p "truncated" (buffer-string))))
+
+(ert-deftest llemar-test-write-diff-live ()
+  "Write arguments render before any results, without the output cap."
+  (let ((llemar-max-tool-result-lines 2))
+    (llemar-test-with-conversation "write" "Write files"
+      (llemar-test--assert-write-diffs))))
+
+(ert-deftest llemar-test-write-diff-results ()
+  "Success and failure results preserve proposed contents without duplication."
+  (let ((llemar-max-tool-result-lines 2))
+    (llemar-test-with-conversation "write-results" "Write files"
+      (llemar-test--assert-write-diffs)
+      (dolist (text '("write-ok" "write-error" "write-empty" "write-hostile"
+                      "write-invalid"))
+        (should (string-match-p text (buffer-string))))
+      (llemar-test--goto "^#\\+begin_example error")
+      (org-back-to-heading t)
+      (should (equal (org-get-heading t t t t) "write")))))
+
+(ert-deftest llemar-test-write-diff-replay ()
+  "Saved write arguments render without patches or filesystem reads."
+  (let* ((llemar-executable llemar-test-mock)
+         (llemar-extra-args '("write"))
+         (llemar-max-tool-result-lines 2)
+         (llemar-session-registry nil)
+         (buffer (llemar-resume
+                  (list "write-session" :cwd llemar-test-directory
+                        :file "/tmp/write.jsonl" :label "write"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (llemar-test--wait
+                   (lambda () (string-match-p "write-invalid" (buffer-string)))
+                   llemar--process))
+          (llemar-test--assert-write-diffs))
+      (kill-buffer buffer))))
+
 ;;;; Editor display requests
 
 (ert-deftest llemar-test-open-buffer-live-results ()

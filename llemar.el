@@ -518,16 +518,21 @@ comma.  Org strips that comma again on display and export."
                 (format "\n... (%d more lines)"
                         (- (length lines) max-lines)))))))
 
-(defun llemar--insert-block (marker begin body &optional end)
+(defun llemar--insert-block (marker begin body &optional end preserve-whitespace)
   "Insert an org block at MARKER delimited by BEGIN and END around BODY.
-The block is collapsed unless `llemar-fold-blocks\=' is nil."
+The block is collapsed unless `llemar-fold-blocks\=' is nil.
+With PRESERVE-WHITESPACE, retain BODY's trailing spaces and blank lines."
   (let ((end (or end "#+end_example")))
     (llemar--insert-newline marker)
     (save-excursion
       (goto-char marker)
       (let ((start (point)))
         (insert begin "\n"
-                (llemar--escape-block-body (string-trim-right body)) "\n"
+                (llemar--escape-block-body
+                 (if preserve-whitespace
+                     (string-remove-suffix "\n" body)
+                   (string-trim-right body)))
+                (if (and preserve-whitespace (string-empty-p body)) "" "\n")
                 end "\n")
         (when llemar-fold-blocks
           (llemar--fold start 'block))))))
@@ -611,6 +616,40 @@ the shared insertion marker so the two cannot be confused."
           (let ((own (copy-marker section t)))
             (puthash tool-call-id own llemar--tool-markers)
             own)))))
+
+(defun llemar--render-tool-arguments (id name args)
+  "Render ARGS for tool call ID named NAME.
+Write calls show their proposed entire file as additions, not a change diff.
+Other calls, including malformed write arguments, retain their JSON preview."
+  (let* ((marker (llemar--tool-marker id name))
+         (content (and (equal name "write") (listp args)
+                       (alist-get 'content args)))
+         (path (and (equal name "write") (listp args)
+                    (alist-get 'path args))))
+    (if (and (stringp content) (stringp path))
+        (let* ((llemar-fold-blocks nil)
+               (terminated (string-suffix-p "\n" content))
+               (lines (unless (string-empty-p content)
+                        (split-string (if terminated
+                                          (string-remove-suffix "\n" content)
+                                        content)
+                                      "\n")))
+               (additions (mapconcat (lambda (line) (concat "+" line))
+                                     lines "\n")))
+          (llemar--insert-block
+           marker "#+begin_example"
+           (concat "Path: " path "\nProposed file contents (entire file):"))
+          (llemar--insert-block
+           marker "#+begin_src diff"
+           (if (string-empty-p content) ""
+             (concat additions "\n"
+                     (unless terminated "\\ No newline at end of file\n")))
+           "#+end_src" t))
+      (when-let* ((pretty (and args
+                              (not (eq args :null))
+                              (not (eq args :false))
+                              (llemar--json-pretty args))))
+        (llemar--insert-block marker "#+begin_src json" pretty "#+end_src")))))
 
 (defun llemar--release-tool-markers ()
   "Forget the tool markers recorded for this buffer."
@@ -886,13 +925,7 @@ exactly as the agent sent them."
        (let* ((call (alist-get 'toolCall event))
               (id (alist-get 'id call))
               (args (llemar--display-arguments call raw)))
-         (when-let* ((pretty (and args
-                                 (not (eq args :null))
-                                 (not (eq args :false))
-                                 (llemar--json-pretty args))))
-           (llemar--insert-block
-            (llemar--tool-marker id (alist-get 'name call))
-            "#+begin_src json" pretty "#+end_src"))))
+         (llemar--render-tool-arguments id (alist-get 'name call) args)))
       ("error"
        (llemar--note (format "stream error: %s"
                              (or (alist-get 'error event)
@@ -992,11 +1025,7 @@ headings."
             (let ((id (alist-get 'id block))
                   (name (alist-get 'name block))
                   (args (alist-get 'arguments block)))
-              (llemar--tool-marker id name)
-              (when-let* ((pretty (and args (llemar--json-pretty args))))
-                (llemar--insert-block (llemar--tool-marker id name)
-                                      "#+begin_src json" pretty
-                                      "#+end_src"))))))))
+              (llemar--render-tool-arguments id name args)))))))
     ("toolResult"
      ;; Reuse the live result renderer by shaping a matching record; a
      ;; saved message carries no duration, so none is shown.

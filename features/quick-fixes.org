@@ -1,13 +1,27 @@
 #+title: Quick fixes
 
-* TODO Show diffs for write tool calls
-Apply the diff behavior currently provided for =edit= tool calls to =write=
-tool calls as well.
+* DONE Show diffs for write tool calls
+Display =write= arguments as a path plus a syntax-highlighted, additions-only
+Org =diff= source block, rather than duplicating the content in JSON. Label it
+"Proposed file contents (entire file)" and render at call time, independently
+of success or failure. This is a full-content preview, not a before/after diff:
+overwrites do not show removed lines.
 
-Successful writes should display a syntax-highlighted Org =diff= source block,
-expanded by default and kept complete regardless of the tool-result line cap,
-consistent with edit diffs. Include coverage for both live output and resumed
-history using deterministic offline tests.
+Keep the block expanded and complete regardless of the tool-result line cap.
+Use only existing tool-call data, with no backend override or filesystem reads.
+Cover live output before results, success/failure results, resumed history,
+empty files, missing final newlines, whitespace, and Org escaping with
+deterministic offline tests.
+
+* TODO Move point to the buffer end when submitting a prompt
+After a prompt is successfully submitted, move point in the submitting window
+to the end of the conversation buffer so =llemar-follow-output= can follow the
+response. This should work when =C-c C-c= is invoked from within a paragraph,
+not just when point is already at the end.
+
+Preserve the ability to scroll away afterward, and do not move point in other
+windows viewing the conversation. Rejected or empty submissions should not
+move point. Write deterministic offline tests before implementing.
 
 * TODO Fully minimize tool-use headings by default
 Ideally, tool-use Org headings should start fully folded, hiding their entire
