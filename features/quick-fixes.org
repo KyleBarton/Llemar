@@ -1,5 +1,20 @@
 #+title: Quick fixes
 
+* TODO Resume sessions across working directories
+=llemar-resume= should offer sessions from other folders, not just the current
+working directory. Selecting one should start the resumed conversation and its
+pi process in that session's recorded working directory, with the conversation
+buffer's =default-directory= set accordingly. Do not require the user to change
+directories before invoking resume, or change unrelated buffers' directories.
+
+Preserve newest-first ordering, transcript previews, and the existing behavior
+of replacing the current Llemar conversation. Show enough directory context in
+the picker to distinguish sessions from different projects. Handle a missing or
+inaccessible recorded directory explicitly rather than silently resuming in the
+wrong folder; a failed startup must preserve the current conversation.
+Cover cross-directory selection, buffer/process working directories, and failure
+handling with deterministic offline tests before implementing.
+
 * TODO Fold previous conversation headings after successful compaction
 After confirmed successful compaction, collapse all previous conversation
 headings, including earlier archives and retained messages, leaving the active
