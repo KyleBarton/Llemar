@@ -1,0 +1,150 @@
+#+title: Group assistant output under one turn heading
+
+* TODO Reduce duplicated Assistant headings
+Use one Assistant heading for an entire user-visible assistant turn, rather
+than repeating it for the individual assistant messages produced while
+thinking, calling tools, and responding to tool results.
+
+The need is to make the conversation easier to scan and fold. Whether to
+preserve chronological interleaving or group output by category is undecided. This is a
+design record, not an implementation request yet.
+
+Current rendering opens an Assistant heading for each backend assistant
+message. A tool round trip can therefore produce multiple Assistant headings
+for what the user experiences as one turn. Do not assume that every thinking
+block or tool call currently creates a separate Assistant heading.
+
+* User's proposed format: category sections
+The user supplied a temporary =example.org= illustration showing one Assistant
+heading with tools, thinking, and messages grouped into separate sections.
+Its full desired outline is preserved below; the temporary file is not needed.
+Adapted below to the
+current conversation container. This is a concrete proposal, not a final choice:
+continuation headings and non-heading tool containers are also under discussion.
+
+#+begin_example
+,* Current
+,** User
+Hey do a thing
+,** Assistant
+,*** tools
+,**** bash
+,**** write
+,*** thinking
+:THINKING:
+I'll do some thinking
+:END:
+,*** messages
+I thought
+
+Final message
+,** User
+<awaiting prompt here>
+#+end_example
+
+This offers a stable outline, but groups content by category rather than event
+order: an intermediate message and final answer become adjacent even when tool
+activity happened between them. Streaming would insert into multiple sections;
+decide whether links, timestamps, or other context are needed. A collapsed
+=tools= parent would also hide edit/write previews regardless of their own
+expanded state, so initial visibility needs an explicit design.
+
+* Alternative: chronological continuation headings
+Keep one Assistant heading and use sibling continuation sections after tools
+to restore the scope of subsequent assistant prose. Illustrative labels below
+are not selected names.
+
+#+begin_example
+,* Current
+,** User
+Please investigate this.
+
+,** Assistant
+:THINKING:
+Initial reasoning.
+:END:
+I'll check the files.
+
+,*** bash
+[arguments and result; subtree initially collapsed]
+
+,*** Continuation (name and necessity undecided)
+:THINKING:
+Reasoning after the tool result.
+:END:
+Here is what I found.
+
+,*** edit
+[visible diff preview]
+
+,*** Response (name and necessity undecided)
+Final explanation.
+
+,** User
+#+end_example
+
+Org hierarchy is the central constraint: prose after a tool heading remains
+inside that tool's subtree until a sibling or ancestor heading ends it.
+Simply removing repeated Assistant headings would therefore hide later
+assistant prose inside collapsed tool subtrees. This proposal uses sibling
+continuation headings to restore the proper scope, but their naming, levels,
+and even their use remain open. Avoid replacing duplicated Assistant labels
+with equally noisy generic labels without considering alternatives.
+
+* Alternative: tools without headings
+The user also proposed dropping tool headings and using code blocks to tuck
+calls away. This removes the heading-scope problem and could preserve the
+chronological stream of prose, thinking, and tools under one Assistant heading.
+
+Possible containers to investigate (not selected):
+- One source/example block per call: simple built-in folding, but a single block
+  cannot contain independent Org JSON/diff blocks with their own highlighting.
+  Decide how arguments, results, tool identity, and status would be represented.
+- One drawer per call containing argument/result blocks: potentially preserves
+  multiple block types without creating outline children. Verify Org parsing,
+  nested folding, streaming insertion, and manual expansion before committing.
+- A visible tool label plus separate blocks: minimal structure, but multiple
+  folds per call rather than a single fold hiding all ordinary tool details.
+
+For any non-heading container, keep edit/write diff previews visible by default;
+put them outside a collapsed container or leave their container expanded.
+Do not assume a drawer/source-block redesign works without deterministic tests.
+
+* Open questions
+- What exactly defines a turn? A useful candidate is the full assistant run
+  following one user submission, through all tool round trips until settlement,
+  not pi's individual assistant messages or tool-loop turn events. Confirm it.
+- Which organizing principle is desired: the category grouping illustrated above,
+  chronological continuation headings, or a chronological stream without tool
+  headings? None is selected yet.
+- If categories are used, how much chronological context needs to remain visible?
+- If tool headings are removed, what labels and containers replace their identity,
+  status, navigation targets, and single-action folding?
+- How should a final answer stand out without another Assistant heading?
+  Should continuation labels be visible, numbered, or otherwise minimized?
+- How should parallel tools and out-of-order results retain their ownership
+  and chronological context within the grouped turn?
+- How do steering, queued follow-up prompts, aborts, retries, errors, and
+  interrupted/resumed runs affect turn boundaries?
+- How should thinking drawers and ordinary tool subtrees fold while edit/write
+  diff previews remain front and center? Preserve the live-verified exception
+  for edit/write headings rather than hiding them under a collapsed wrapper.
+- Can live events and saved history reconstruct the same turn boundaries
+  reliably? What should happen when a resumed transcript lacks boundary data?
+- How should compaction archives and retained messages behave if a compaction
+  boundary falls inside a grouped turn?
+- How should assistant-authored Org headings nest within this structure without
+  colliding with tool, continuation, User, or archive headings?
+
+* Constraints and related work
+- Preserve existing heading levels unless a deliberate design decision changes
+  them; =* Current= contains =** User= and =** Assistant= today. The request's
+  shorthand =* Assistant= does not by itself require moving Assistant to level 1.
+- Preserve transcript escaping, tool-result ownership, unsent input, navigation,
+  following behavior, and manual folding/expansion.
+- Test any eventual implementation with deterministic offline mock-pi scenarios
+  for live rendering, replay, parallel tools, and compaction.
+- Coordinate with [[file:assistant-org-responses.org][assistant-authored Org content]] and
+  [[file:compaction.org][compaction history preservation]].
+- Tool-heading folding and the edit/write visibility exception are complete;
+  this feature is separate follow-up design work.
