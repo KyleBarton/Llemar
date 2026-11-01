@@ -1078,6 +1078,13 @@ exactly as the agent sent them."
   "Insert the tool result carried by RECORD under its tool heading."
   (let* ((id (alist-get 'toolCallId record))
          (marker (llemar--tool-marker id (alist-get 'toolName record)))
+         (heading (save-excursion
+                    (goto-char marker)
+                    (org-back-to-heading t)
+                    (point)))
+         (folded (org-fold-folded-p
+                  (save-excursion (goto-char heading) (line-end-position))
+                  'outline))
          (text (llemar--result-text (alist-get 'result record)))
          (duration (alist-get 'durationMs record)))
     (llemar--insert-block
@@ -1100,7 +1107,13 @@ exactly as the agent sent them."
     (when duration
       (save-excursion
         (goto-char marker)
-        (insert (format "# %sms\n" duration))))))
+        (insert (format "# %sms\n" duration))))
+    ;; Late output can land beyond the old fold boundary when another tool
+    ;; heading follows.  Extend only an existing fold, respecting user expansion.
+    (when folded
+      (save-excursion
+        (goto-char heading)
+        (org-fold-hide-subtree)))))
 
 (defun llemar--result-text (result)
   "Extract the text content of a tool RESULT."
