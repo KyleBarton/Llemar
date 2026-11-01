@@ -1,5 +1,18 @@
 #+title: Quick fixes
 
+* TODO Establish dedicated Llemar mode-line faces
+After practical use of the mode line, introduce customizable Llemar faces.
+The approved preview uses =bold= for the project, =shadow= for the model and
+separators, =success= for User, =font-lock-keyword-face= for Assistant/tools,
+=warning= for compaction/retries, and =error= for errors/disconnection.
+Turn labels are bold; colors come from the user's theme.
+
+Keyword highlighting is a pragmatic accent, not a semantic match for awaiting
+another party. We considered =mode-line-emphasis= and IRC's participant faces
+(=erc-nick-default-face= versus =erc-my-nick-face=/=erc-prompt-face=). Revisit
+participant identity versus operational state when choosing inheritance, but
+avoid an ERC dependency. Keep the approved styling until real use informs this.
+
 * DONE Show diffs for write tool calls
 Display =write= arguments as a path plus a syntax-highlighted, additions-only
 Org =diff= source block, rather than duplicating the content in JSON. Label it

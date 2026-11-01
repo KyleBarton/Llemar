@@ -160,6 +160,18 @@ A window scrolled up to read earlier output is left undisturbed."
 (defvar-local llemar--session-id nil
   "The pi session id this buffer is currently driving, if known.")
 
+(defvar-local llemar--model-name nil
+  "Display name of the model reported by pi.")
+
+(defvar-local llemar--session-stats nil
+  "Latest native pi session cost and context statistics.")
+
+(defvar-local llemar--active-tools nil
+  "Alist of currently executing tool call IDs and names.")
+
+(defvar-local llemar--run-error nil
+  "Non-nil when the latest assistant response failed.")
+
 ;;;; Session registry
 
 (defvar llemar-session-registry nil
@@ -239,7 +251,11 @@ after `new_session' or a resume."
          (lambda (response)
            (when (alist-get 'success response)
              (let* ((data (alist-get 'data response))
-                    (id (alist-get 'sessionId data)))
+                    (id (alist-get 'sessionId data))
+                    (model (alist-get 'model data)))
+               (setq llemar--model-name
+                     (or (alist-get 'name model) (alist-get 'id model)))
+               (force-mode-line-update)
                (when id
                  (setq llemar--session-id id)
                  (llemar--registry-put id
@@ -354,6 +370,8 @@ resume that session file or id."
     (user-error "Cannot find `%s'.  Install pi from https://pi.dev"
                 llemar-executable))
   (llemar--cancel-displays)
+  (setq llemar--model-name nil llemar--session-stats nil
+        llemar--active-tools nil llemar--run-error nil)
   (setq llemar--display-root (file-name-as-directory (file-truename default-directory)))
   (let* ((conversation (current-buffer))
          (process-environment (copy-sequence process-environment))
@@ -378,6 +396,7 @@ resume that session file or id."
     (setq llemar--process process)
     (llemar--set-status nil)
     (llemar--record-session)
+    (llemar--refresh-stats)
     process))
 
 (defun llemar--process-sentinel (process event)
@@ -596,14 +615,95 @@ preview rather than breaking the transcript."
         (buffer-string))
     (error nil)))
 
+;;;; Conversation mode line
+
+(defun llemar--refresh-stats ()
+  "Refresh cached usage from pi, never from mode-line redisplay."
+  (when (llemar--process-live-p)
+    (ignore-errors
+      (llemar--send
+       '((type . "get_session_stats"))
+       (lambda (response)
+         (when (alist-get 'success response)
+           (setq llemar--session-stats (alist-get 'data response))
+           (force-mode-line-update)))))))
+
+(defun llemar--mode-line-turn ()
+  "Return the conversation turn label with its theme-aware face."
+  (let* ((status llemar--status)
+         (label
+          (cond ((equal status "dead") "Disconnected")
+                ((equal status "compacting") "Compacting")
+                ((equal status "retrying") "Retrying")
+                ((equal status "sending") "Sending")
+                ((equal status "aborting") "Aborting")
+                (llemar--active-tools
+                 (concat "Tool: " (cdar llemar--active-tools)))
+                ((or llemar--run-error (equal status "error")) "Error")
+                (llemar--busy "Assistant")
+                (t "User")))
+         (face (cond ((member label '("Disconnected" "Error")) 'error)
+                     ((member label '("Compacting" "Retrying" "Aborting"))
+                      'warning)
+                     ((equal label "User") 'success)
+                     (t 'font-lock-keyword-face))))
+    (propertize label 'face (list :inherit face :weight 'bold))))
+
+(defun llemar--mode-line-left (width)
+  "Render identity and activity within WIDTH columns.
+Shorten the quoted title first, then identity; keep the turn visible."
+  (let* ((project (file-name-nondirectory
+                   (directory-file-name default-directory)))
+         (entry (cdr (assoc llemar--session-id llemar-session-registry)))
+         (title (llemar--one-line (or (plist-get entry :name) "Untitled") 200))
+         (model (or llemar--model-name "—"))
+         (turn (llemar--mode-line-turn))
+         (fixed (+ (string-width project) (string-width model)
+                   (string-width turn) 11))
+         (title (truncate-string-to-width title (max 0 (- width fixed))
+                                          nil nil "…"))
+         (identity (concat (propertize project 'face 'bold)
+                           "  \"" title "\" "
+                           (propertize (concat "│ " model " │") 'face 'shadow)))
+         (budget (max 0 (- width (string-width turn) 1))))
+    (concat (truncate-string-to-width identity budget nil nil "…") " " turn)))
+
+(defun llemar--token-count (count)
+  "Format token COUNT compactly, or indicate unavailable data."
+  (cond ((not (numberp count)) "—")
+        ((>= count 1000) (format "%sk" (/ (round count) 1000)))
+        (t (format "%d" count))))
+
+(defun llemar--mode-line-right ()
+  "Render estimated session spend and native context usage."
+  (let* ((stats llemar--session-stats)
+         (cost (alist-get 'cost stats))
+         (usage (alist-get 'contextUsage stats))
+         (percent (alist-get 'percent usage)))
+    (propertize
+     (format "~$%s  %s/%s (%s%%)"
+             (if (numberp cost) (format "%.2f" cost) "—")
+             (llemar--token-count (alist-get 'tokens usage))
+             (llemar--token-count (alist-get 'contextWindow usage))
+             (if (numberp percent) (format "%.0f" percent) "—"))
+     'help-echo
+     "Estimated session USD cost; context tokens / model window (percent). Not a bill."
+     'mouse-face 'mode-line-highlight)))
+
+(defun llemar--mode-line ()
+  "Render the conversation mode line with right-aligned usage metrics."
+  (let* ((right (llemar--mode-line-right))
+         (size (string-width right))
+         (width (window-total-width))
+         (left (llemar--mode-line-left (max 0 (- width size 4)))))
+    (list " " (replace-regexp-in-string "%" "%%" left t t)
+          (propertize " " 'display
+                      `(space :align-to (- right ,(1+ size))))
+          (replace-regexp-in-string "%" "%%" right t t) " ")))
+
 (defun llemar--set-status (status)
   "Set this buffer's activity STATUS and refresh the mode line."
   (setq llemar--status status)
-  (setq mode-line-process
-        (cond ((and status llemar--busy) (format " [%s]" status))
-              (llemar--busy " [running]")
-              (status (format " [%s]" status))
-              (t nil)))
   (force-mode-line-update))
 
 ;;;; Tool call rendering
@@ -825,13 +925,14 @@ RAW is the undecoded JSON line the record was parsed from."
 RAW is the JSON line RECORD was parsed from."
   (pcase (alist-get 'type record)
     ("agent_start"
-     (setq llemar--busy t)
+     (setq llemar--busy t llemar--active-tools nil llemar--run-error nil)
      (clrhash llemar--streamed-blocks)
      (llemar--set-status "thinking"))
     ("message_start"
      (let* ((message (alist-get 'message record))
             (role (alist-get 'role message)))
        (when (equal role "assistant")
+         (setq llemar--run-error nil)
          ;; Content indices restart with each message.
          (clrhash llemar--streamed-blocks)
          (llemar--open-assistant))
@@ -842,11 +943,22 @@ RAW is the JSON line RECORD was parsed from."
          (setq llemar--pending-user-marker nil))))
     ("message_update"
      (llemar--handle-message-update (alist-get 'assistantMessageEvent record) raw))
+    ("message_end"
+     (let ((message (alist-get 'message record)))
+       (when (equal (alist-get 'role message) "assistant")
+         (setq llemar--run-error
+               (equal (alist-get 'stopReason message) "error"))
+         (llemar--refresh-stats)
+         (force-mode-line-update))))
     ("tool_execution_start"
+     (push (cons (alist-get 'toolCallId record) (alist-get 'toolName record))
+           llemar--active-tools)
      (llemar--tool-marker (alist-get 'toolCallId record)
                           (alist-get 'toolName record))
      (llemar--set-status (format "%s" (alist-get 'toolName record))))
     ("tool_execution_end"
+     (setq llemar--active-tools
+           (assoc-delete-all (alist-get 'toolCallId record) llemar--active-tools))
      (llemar--render-tool-result record)
      (when (and (equal (alist-get 'toolName record) "open_buffer")
                 (not (alist-get 'isError record)))
@@ -855,8 +967,11 @@ RAW is the JSON line RECORD was parsed from."
     ("agent_settled"
      (when llemar--pending-user-marker
        (set-marker llemar--pending-user-marker nil))
-     (setq llemar--busy nil llemar--pending-user-marker nil)
+     (setq llemar--busy nil llemar--pending-user-marker nil
+           llemar--active-tools nil)
      (llemar--set-status nil)
+     (llemar--record-session)
+     (llemar--refresh-stats)
      (when (alist-get 'aborted record)
        (llemar--note "aborted"))
      (llemar--open-user-prompt)
@@ -876,6 +991,7 @@ RAW is the JSON line RECORD was parsed from."
      (setq llemar--compacting t)
      (llemar--set-status "compacting"))
     ("compaction_end"
+     (llemar--refresh-stats)
      (setq llemar--compacting nil)
      (when (equal (alist-get 'reason record) "manual")
        (setq llemar--busy nil))
@@ -1502,9 +1618,11 @@ Wait for the current run to settle before requesting manual compaction."
            (set-marker (llemar--marker) (point-max))
            (llemar--insert-preamble)
            (goto-char (point-max))
-           (setq llemar--session-id nil)
+           (setq llemar--session-id nil llemar--session-stats nil
+                 llemar--active-tools nil llemar--run-error nil)
            (llemar--set-status nil)
-           (llemar--record-session)))))))
+           (llemar--record-session)
+           (llemar--refresh-stats)))))))
 
 (defun llemar-restart ()
   "Restart the pi process for this buffer."
@@ -1562,6 +1680,7 @@ Wait for the current run to settle before requesting manual compaction."
   (setq llemar--streamed-blocks (make-hash-table :test #'equal))
   (setq llemar--insert-marker (copy-marker (point-max) t))
   (setq-local org-hide-drawer-startup t)
+  (setq-local mode-line-format '((:eval (llemar--mode-line))))
   (add-hook 'kill-buffer-hook #'llemar--save-transcript nil t)
   (add-hook 'kill-buffer-hook #'llemar--cleanup nil t))
 

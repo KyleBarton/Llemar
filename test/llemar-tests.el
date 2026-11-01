@@ -1160,6 +1160,71 @@ They are distinct values on the wire and must not collapse together."
             (should (eq (window-buffer other-window) other)))
         (kill-buffer other)))))
 
+;;;; Conversation mode line
+
+(ert-deftest llemar-test-mode-line-native-data ()
+  "Show identity and native pi usage, with the approved faces."
+  (llemar-test-with-conversation "status" "Work"
+    (should (llemar-test--wait (lambda () llemar--session-stats)
+                              llemar--process))
+    (let ((left (llemar--mode-line-left 120))
+          (right (llemar--mode-line-right)))
+      (should (string-match-p "test  \"A quoted session\" │ Mock Model │ User" left))
+      (should (eq (get-text-property 0 'face left) 'bold))
+      (should (equal right "~$0.45  60k/200k (30%)"))
+      (should (string-match-p "Estimated" (get-text-property 0 'help-echo right)))
+      ;; :eval strings still interpret mode-line %-constructs.
+      (should (string-match-p "30%%" (format "%s" (llemar--mode-line))))
+      (llemar--registry-put llemar--session-id :name "100% complete")
+      (should (string-match-p "100%% complete"
+                              (format "%s" (llemar--mode-line))))
+      (llemar--registry-put llemar--session-id :name "A quoted session")
+      (should (local-variable-p 'mode-line-format))
+      (should (string-match-p "A quoted session" (format "%s" (llemar--mode-line)))))
+    (delete-process llemar--process)
+    (should (llemar-test--wait (lambda () (equal llemar--status "dead"))))
+    (should (string-match-p "Disconnected" (llemar--mode-line-left 120)))))
+
+(ert-deftest llemar-test-mode-line-transitions ()
+  "Native events distinguish participants, parallel tools and recovery."
+  (let ((original (symbol-function 'llemar--handle-event))
+        observations)
+    (cl-letf (((symbol-function 'llemar--handle-event)
+               (lambda (record &optional raw)
+                 (funcall original record raw)
+                 (push (cons (alist-get 'type record)
+                             (llemar--mode-line-left 120)) observations))))
+      (llemar-test-with-conversation "status" "Work"
+        (dolist (pair '(("agent_start" . "Assistant")
+                        ("tool_execution_start" . "Tool: read")
+                        ("auto_retry_start" . "Retrying")
+                        ("compaction_start" . "Compacting")
+                        ("agent_settled" . "User")))
+          (should (string-match-p (cdr pair) (cdr (assoc (car pair) observations)))))
+        (let ((ends (reverse (seq-filter
+                              (lambda (item) (equal (car item) "tool_execution_end"))
+                              observations))))
+          (should (string-match-p "Tool: read" (cdar ends)))
+          (should (string-match-p "Assistant" (cdr (cadr ends)))))))))
+
+(ert-deftest llemar-test-mode-line-unknown-and-narrow ()
+  "Never fabricate unknown usage, and shorten identity before metrics."
+  (llemar-test-with-conversation "status-unknown" "Work"
+    (should (llemar-test--wait (lambda () llemar--session-stats)
+                              llemar--process))
+    (should (equal (llemar--mode-line-right) "~$—  —/200k (—%)"))
+    (llemar--registry-put llemar--session-id
+                          :name "A very long session title that must truncate")
+    (let ((left (llemar--mode-line-left 42)))
+      (should (<= (string-width left) 42))
+      (should (string-match-p "User" left))
+      (should (string-match-p "…" left)))
+    (llemar-restart)
+    (should-not llemar--session-stats)
+    (should (llemar-test--wait (lambda () llemar--session-stats)
+                              llemar--process))
+    (should (string-match-p "User" (llemar--mode-line-left 120)))))
+
 (provide 'llemar-tests)
 
 ;;; llemar-tests.el ends here

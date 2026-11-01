@@ -1,5 +1,11 @@
 #+title: Make the current agent state obvious
 
+* DONE Agent-state visibility
+Implemented and accepted after live dogfooding. The approved mode line provides
+project/session/model identity, turn/activity, estimated spend, and context usage.
+Dedicated faces and queued/steering input-disposition details are optional
+follow-ups, not blockers for this completed feature.
+
 * Goal
 Make the active conversation's identity and agent state apparent at a glance,
 without requiring users to inspect the transcript or diagnostic log.
@@ -8,10 +14,13 @@ without requiring users to inspect the transcript or diagnostic log.
 - Show the project or working directory, model, and session identity.
 - Distinguish thinking, running a tool, waiting for user input, idle, and error
   or disconnected states where pi exposes those distinctions.
-- Make it clear whether user input was sent, queued, or used to steer a run.
+- Deferred follow-up: show whether input was queued or used to steer a run.
 - Expose context usage and compaction status when available from pi.
-- Keep the presentation compact; a mode-line indicator is a candidate, not a
-  settled design.
+- Use a compact conversation mode line: root folder name, quoted session title,
+  model, and turn/activity on the left; estimated USD spend and context
+  tokens/window (percentage) right-aligned. No literal =ctx= label.
+- Use the approved preview's existing theme faces initially; dedicated Llemar
+  faces are a follow-up in [[file:quick-fixes.org][quick fixes]].
 
 * Implementation guidance
 - Use pi's RPC events and state as the source of truth. Do not implement a
@@ -25,12 +34,28 @@ without requiring users to inspect the transcript or diagnostic log.
   a diagnostic command.
 - A user can tell whether the agent is working, needs input, has finished, or
   has lost its connection.
-- Input disposition is visible when sending or steering during a run.
+- Queued/steering input-disposition details are outside the accepted scope.
 - Context and compaction information reflects what pi actually reports.
 - State transitions and recovery paths are covered by deterministic offline
   tests using scenarios in test/mock-pi.
 
-* Open questions
-- Which information belongs in the mode line versus an on-demand status view?
-- Which states and context metrics are available through the current RPC API?
-- How should long project and session names be abbreviated?
+* Optional follow-ups
+- How should queued/steering input disposition be incorporated without clutter?
+
+* Implementation
+- The first implementation uses built-in RPC only: =get_state= for session/model
+  identity, =get_session_stats= for cost and context, and lifecycle/tool events
+  for activity. No pi customization or compaction-threshold assumptions.
+- The project is bold, model/separators use =shadow=, and bold turn labels use
+  =success= (User), =font-lock-keyword-face= (Assistant/tools), =warning=
+  (compaction/retries), and =error= (errors/disconnection).
+- Session titles truncate first; identity shortens further on narrow windows.
+  Tool activity tracks outstanding call IDs so one parallel completion cannot
+  incorrectly report that all tools have finished.
+- Statistics refresh on startup/resume, assistant message completion, compaction
+  completion, and settled runs. Redisplay reads cached values only. Unknown
+  statistics use em dashes, and cost is explicitly an estimate, not billing.
+- Input-disposition presentation remains a follow-up; this first pass implements
+  the approved identity, participant/activity, spend, and context layout.
+- Offline mock scenarios cover native stats, unavailable values, state changes,
+  parallel tools, process death, restart, title changes, and narrow layouts.

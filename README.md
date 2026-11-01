@@ -21,6 +21,9 @@ access, tools, and session history.
   with its saved transcript rendered in a new buffer.
 - **Agent-driven file display:** the companion `open_buffer` tool opens local
   project files at an optional line and column, without stealing focus.
+- **Conversation mode line:** project, quoted session title, model, and current
+  turn/activity, with right-aligned estimated spend and context tokens/window
+  plus percentage, using pi's native statistics.
 - **Run controls:** send prompts, steer or abort an active run, start a fresh
   session, restart pi, inspect session state, and view diagnostic logs.
 - **Output following:** windows at the end follow new output; scrolling back
@@ -117,6 +120,24 @@ applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
 
+### Conversation mode line
+
+```text
+ Llemar  "Session title" │ Sonnet │ Assistant          ~$0.45  60k/200k (30%)
+```
+
+The project is the working directory's root folder name. The title truncates
+first in narrow windows. The turn label distinguishes User (ready for input),
+Assistant, Tool, Compacting, Retrying, Error, and Disconnected; color supplements
+these labels using your theme's existing faces.
+
+The right-hand group shows estimated cumulative session cost in USD, followed
+by estimated context tokens / model window and percentage. This is not a bill
+or a subscription usage meter. Values come from pi's `get_session_stats`, refreshed
+at startup and after assistant responses, compaction, and settled runs. Missing
+values show an em dash, including context usage temporarily unknown after
+compaction. No compaction threshold is assumed, and redisplay never sends RPCs.
+
 ### Compaction
 
 `M-x llemar-compact` (or `C-c C-m`) asks pi to compact context on demand once
@@ -124,7 +145,7 @@ the agent is idle. With `C-u`, enter optional instructions for the summary.
 `C-c C-k` can cancel compaction. Automatic threshold and overflow compactions
 use the same presentation, without interrupting continued generation.
 
-The mode line shows `compacting` during the operation. After confirmed
+The mode line shows `Compacting` during the operation. After confirmed
 success, the compacted prefix becomes a timestamped top-level `Compacted`
 section with `Source` (the preserved original transcript) and `Summary`
 (pi's actual retained summary). Recent messages still in context stay under
