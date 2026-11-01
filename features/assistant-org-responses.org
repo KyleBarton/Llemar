@@ -1,0 +1,34 @@
+#+title: Let assistant responses use Org expressively
+
+* TODO Brainstorm assistant-authored Org content
+Today Org primarily manages the conversation's meta structure: message
+headings, tool subtrees, thinking drawers, and compaction archives. Let the
+assistant also use Org as an expressive response format when appropriate,
+for example a series of headlines or executable source blocks.
+
+This is speculative and needs design discussion before implementation.
+Prompts and tooling may be a better fit than interpreting arbitrary output as
+trusted Org. Distinguish support available out of the box in pi from anything
+requiring companion tooling, prompt configuration, or backend customization;
+discuss those requirements explicitly before proceeding.
+
+* Questions to explore
+- How should the agent opt into structured Org: response instructions, a tool,
+  an explicit content envelope, or another mechanism?
+- How do response headlines nest beneath the Assistant message without
+  impersonating User/tool headings or escaping the conversation subtree?
+- How can source blocks remain valid, syntax-highlighted, and available for
+  deliberate user-initiated Org Babel execution? Rendering a response must
+  never execute code or silently bypass the user's confirmation policy.
+- How should partial streaming, malformed Org, literal Org examples, block
+  terminators, and other structural collisions be handled?
+- Which Org features are useful initially, and which should stay out of scope?
+- How should structured responses round-trip through saved transcripts,
+  history replay, folding, and compaction without losing their boundaries?
+
+* Constraints
+- Preserve conversation integrity. Do not simply disable the escaping that
+  currently protects the transcript's structure.
+- Keep plain prose and literal code usable without forcing elaborate markup.
+- Test any eventual rendering/protocol design offline with mock pi scenarios,
+  including hostile or malformed content. Do not require a real model call.

@@ -1,5 +1,33 @@
 #+title: Quick fixes
 
+* TODO Fold previous conversation headings after successful compaction
+After confirmed successful compaction, collapse all previous conversation
+headings, including earlier archives and retained messages, leaving the active
+=User= prompt heading and its input area visible. In the current structure this
+is =** User= under =* Current=; do not change heading levels to achieve folding.
+Keep the necessary ancestor heading open and allow manual expansion of history.
+
+Preserve unsent input and avoid stealing point from a user reading elsewhere.
+For automatic compaction during an ongoing run, decide when to apply the final
+folding so continued output remains visible and no premature user prompt is
+created. Failed or cancelled compaction must not trigger this cleanup.
+Extend the offline compaction scenarios to cover this presentation change.
+See [[file:compaction.org][compaction history preservation]].
+
+* TODO Scope automatic paren and quotation pairing to the current heading
+Typing in a User prompt must not inherit unmatched quotes or parentheses from
+previous messages. Observed symptom: typing two quotation marks produces three
+(=\"\"\"=) because an earlier quotation mark in the backscroll is unmatched.
+
+Investigate which pairing/syntax mechanism is active in the user's Emacs before
+choosing a fix; do not assume the cause is =electric-pair-mode= rather than
+another pairing package. Limit the relevant editing context to the current
+message heading, without permanently narrowing the conversation or breaking
+Org navigation, folding, source-block editing, or normal transcript rendering.
+Cover unmatched quotes/parens in previous messages and normal pairing within
+the current prompt. Verify against the user's live configuration as well as
+deterministic offline tests.
+
 * TODO Establish dedicated Llemar mode-line faces
 After practical use of the mode line, introduce customizable Llemar faces.
 The approved preview uses =bold= for the project, =shadow= for the model and
