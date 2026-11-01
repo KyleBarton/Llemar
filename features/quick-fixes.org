@@ -28,19 +28,6 @@ Cover unmatched quotes/parens in previous messages and normal pairing within
 the current prompt. Verify against the user's live configuration as well as
 deterministic offline tests.
 
-* TODO Establish dedicated Llemar mode-line faces
-After practical use of the mode line, introduce customizable Llemar faces.
-The approved preview uses =bold= for the project, =shadow= for the model and
-separators, =success= for User, =font-lock-keyword-face= for Assistant/tools,
-=warning= for compaction/retries, and =error= for errors/disconnection.
-Turn labels are bold; colors come from the user's theme.
-
-Keyword highlighting is a pragmatic accent, not a semantic match for awaiting
-another party. We considered =mode-line-emphasis= and IRC's participant faces
-(=erc-nick-default-face= versus =erc-my-nick-face=/=erc-prompt-face=). Revisit
-participant identity versus operational state when choosing inheritance, but
-avoid an ERC dependency. Keep the approved styling until real use informs this.
-
 * DONE Show diffs for write tool calls
 Display =write= arguments as a path plus a syntax-highlighted, additions-only
 Org =diff= source block, rather than duplicating the content in JSON. Label it
@@ -64,10 +51,11 @@ Preserve the ability to scroll away afterward, and do not move point in other
 windows viewing the conversation. Rejected or empty submissions should not
 move point. Write deterministic offline tests before implementing.
 
-* TODO Fully minimize tool-use headings by default
-Ideally, tool-use Org headings should start fully folded, hiding their entire
-subtree rather than leaving nested headings visible. Keep manual expansion
-available, and cover both live output and resumed history.
+* DONE Fully minimize tool-use headings by default
+Tool-use Org headings start fully folded, hiding their entire subtree,
+except for =edit= and =write= calls: those headings stay open so their diff
+previews remain front and center. Manual expansion remains available for
+other tools. Covered for live output and resumed history.
 
 * TODO Add a non-replacing conversation command
 Provide an alternate command, tentatively =llemar-open-also=, that starts a new

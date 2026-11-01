@@ -722,7 +722,12 @@ the shared insertion marker so the two cannot be confused."
       (let ((marker (llemar--marker)))
         (llemar--insert-heading marker 3 (or tool-name "tool"))
         (let ((section (marker-position marker)))
-          (save-excursion (goto-char marker) (insert "\n"))
+          (save-excursion
+            (goto-char marker)
+            (insert "\n")
+            (unless (member tool-name '("edit" "write"))
+              (org-back-to-heading t)
+              (org-fold-hide-subtree)))
           (let ((own (copy-marker section t)))
             (puthash tool-call-id own llemar--tool-markers)
             own)))))

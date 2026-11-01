@@ -260,11 +260,37 @@ BUFFER is bound to the conversation buffer inside BODY."
     (llemar-test--goto "^#\\+begin_example$")
     (should (llemar-test--folded-p (save-excursion (forward-line 1) (point))))))
 
+(defun llemar-test--assert-tool-subtrees-folded ()
+  "Assert ordinary tools collapse while edit/write previews stay visible."
+  (goto-char (point-min))
+  (while (re-search-forward "^\\*\\*\\* " nil t)
+    (beginning-of-line)
+    (should-not (llemar-test--folded-p (point)))
+    (let ((preview (member (org-get-heading t t t t) '("edit" "write")))
+          (end (save-excursion (org-end-of-subtree t t) (point))))
+      (forward-line 1)
+      (while (< (point) end)
+        ;; The legacy replay diagnostic is appended outside the tool output.
+        (unless (or (looking-at-p "^[ \t]*$")
+                    (looking-at-p "^# raw session history unavailable;"))
+          (if preview
+              (when (looking-at-p "^#\\+begin_")
+                (should-not (llemar-test--folded-p (point))))
+            (should (llemar-test--folded-p (point)))))
+        (forward-line 1)))))
+
+(ert-deftest llemar-test-tool-subtrees-folded-live ()
+  "Live parallel calls hide all contents, including delimiters and timing."
+  (llemar-test-with-conversation "parallel" "go"
+    (should (= (how-many "^\\*\\*\\* " (point-min) (point-max)) 2))
+    (should (string-match-p "# 44ms" (buffer-string)))
+    (llemar-test--assert-tool-subtrees-folded)))
+
 (ert-deftest llemar-test-folding-leaves-structure-visible ()
-  "Headlines, prose, and the block delimiters themselves stay visible."
+  "Conversation headings and assistant prose stay visible."
   (llemar-test-with-conversation "basic" "go"
     (dolist (regexp '("^\\*\\* User$" "^\\*\\* Assistant$" "^\\*\\*\\* bash$"
-                      "^:THINKING:$" "^#\\+begin_src json$"
+                      "^:THINKING:$"
                       "Here is the plan\\." "Two files\\. Done\\."))
       (llemar-test--goto regexp)
       (should-not (llemar-test--folded-p (point))))))
@@ -285,6 +311,8 @@ could silently vanish."
   (let ((llemar-fold-thinking nil)
         (llemar-fold-blocks nil))
     (llemar-test-with-conversation "basic" "go"
+      (llemar-test--goto "^\\*\\*\\* bash$")
+      (org-show-subtree)
       (llemar-test--goto "^:THINKING:$")
       (should-not (llemar-test--folded-p
                    (save-excursion (forward-line 1) (point))))
@@ -901,6 +929,7 @@ They are distinct values on the wire and must not collapse together."
           (should (string-match-p "^ \\* not a heading$" (buffer-string)))
           (should-not (member "not a heading" (llemar-test--headings)))
           (should-not llemar--busy)
+          (llemar-test--assert-tool-subtrees-folded)
           (should (string-match-p "\\* User\n\\'" (buffer-string))))
       (kill-buffer buffer))))
 
@@ -908,6 +937,7 @@ They are distinct values on the wire and must not collapse together."
 
 (defun llemar-test--assert-edit-diff ()
   "Assert that only the successful edit has a complete diff block."
+  (llemar-test--assert-tool-subtrees-folded)
   (let ((blocks (org-element-map (org-element-parse-buffer) 'src-block
                   (lambda (block)
                     (when (equal (org-element-property :language block) "diff")
@@ -950,6 +980,7 @@ They are distinct values on the wire and must not collapse together."
 
 (defun llemar-test--assert-write-diffs ()
   "Assert complete, expanded proposed contents, without duplicate JSON."
+  (llemar-test--assert-tool-subtrees-folded)
   (let ((blocks (org-element-map (org-element-parse-buffer) 'src-block
                   (lambda (block)
                     (when (equal (org-element-property :language block) "diff")

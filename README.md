@@ -114,8 +114,10 @@ Two files. Done.
 ```
 
 Each assistant turn is its own `** Assistant` heading, with tool calls nested
-beneath the turn that made them. Thinking drawers and tool blocks collapse as
-they complete, so a long run stays readable; `TAB` opens any of them. Org
+beneath the turn that made them. Tool headings start fully collapsed for both
+live output and resumed history; `TAB` expands them. Edit and write headings
+stay open to keep diff previews visible. Thinking drawers and ordinary tool
+blocks also collapse as they complete. Org
 applies `#+startup:` visibility only when a buffer is first visited, which is
 long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
 folding, links, export, and `C-x C-w` all work as usual.
@@ -176,7 +178,8 @@ pi's unified patch:
 ```
 
 Org uses `diff-mode` highlighting when `org-src-fontify-natively` is enabled.
-Diffs are expanded by default, unlike other tool blocks; fold them with `TAB`.
+Edit and write headings stay open, and their diff blocks are expanded by
+default, unlike ordinary tool blocks. Fold them with `TAB`.
 They are kept complete, regardless of the ordinary tool-result line cap.
 Failed edits and edit results without a patch retain their normal output.
 
