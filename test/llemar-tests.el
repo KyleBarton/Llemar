@@ -799,6 +799,35 @@ They are distinct values on the wire and must not collapse together."
                          (insert-file-contents file) (buffer-string))
                        (buffer-string)))))))
 
+(ert-deftest llemar-test-consult-session-preview-at-end ()
+  "Preview the end of a saved transcript without moving the caller's point."
+  (let ((file (make-temp-file "llemar-preview-" nil ".org"))
+        (transcript (generate-new-buffer " *llemar-preview-test*")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer transcript
+            (dotimes (i 100) (insert (format "Line %d\n" i)))
+            (goto-char (point-min)))
+          (cl-letf (((symbol-function 'consult--temporary-files)
+                     (lambda () (lambda (&optional name)
+                                  (and name transcript))))
+                    ((symbol-function 'consult--buffer-preview)
+                     (lambda () (lambda (action buffer)
+                                  (when (and (eq action 'preview) buffer)
+                                    (switch-to-buffer buffer))))))
+            (let* ((caller (current-buffer))
+                   (position (point))
+                   (state (llemar--session-preview
+                           (list (cons "Saved" (list "id" :org-file file))))))
+              (funcall state 'preview "Saved")
+              (should (eq (window-buffer) transcript))
+              (should (= (window-point) (with-current-buffer transcript
+                                         (point-max))))
+              (with-current-buffer caller
+                (should (= (point) position))))))
+      (kill-buffer transcript)
+      (delete-file file))))
+
 (ert-deftest llemar-test-consult-session-preview ()
   "Consult preserves order and previews readable Org transcripts."
   (let* ((original-require (symbol-function 'require))
@@ -811,9 +840,14 @@ They are distinct values on the wire and must not collapse together."
                    (lambda (feature &rest args)
                      (if (eq feature 'consult) t
                        (apply original-require feature args))))
-                  ((symbol-function 'consult--file-preview)
-                   (lambda () (lambda (action file)
-                                (setq previewed (list action file)))))
+                  ((symbol-function 'consult--temporary-files)
+                   (lambda () (lambda (&optional file)
+                                (setq previewed (list 'preview file))
+                                nil)))
+                  ((symbol-function 'consult--buffer-preview)
+                   (lambda () (lambda (action _buffer)
+                                (unless (eq action 'preview)
+                                  (setq previewed (list action nil))))))
                   ((symbol-function 'consult--read)
                    (lambda (candidates &rest options)
                      (should-not (plist-get options :sort))

@@ -299,7 +299,8 @@ With DIRECTORY, keep only sessions recorded for it."
                 (car entry)))))
 
 (declare-function consult--read "consult")
-(declare-function consult--file-preview "consult")
+(declare-function consult--temporary-files "consult")
+(declare-function consult--buffer-preview "consult")
 
 (defun llemar--save-transcript ()
   "Save an Org preview copy of this conversation, when its id is known.
@@ -329,10 +330,18 @@ Failures are logged rather than interrupting the RPC event stream."
 
 (defun llemar--session-preview (choices)
   "Create a Consult preview state for session CHOICES."
-  (let ((preview (consult--file-preview)))
+  (let ((open (consult--temporary-files))
+        (preview (consult--buffer-preview)))
     (lambda (action candidate)
-      (let ((file (plist-get (cdr (cdr (assoc candidate choices))) :org-file)))
-        (funcall preview action (and file (file-readable-p file) file))))))
+      (let* ((file (plist-get (cdr (cdr (assoc candidate choices))) :org-file))
+             (file (and file (file-readable-p file) file)))
+        (unless file (funcall open))
+        (funcall preview action
+                 (when (and file (eq action 'preview))
+                   (when-let* ((buffer (funcall open file)))
+                     (with-current-buffer buffer
+                       (goto-char (point-max)))
+                     buffer)))))))
 
 (defun llemar--read-session (&optional directory)
   "Read a recorded session to resume, limited to DIRECTORY when non-nil.
