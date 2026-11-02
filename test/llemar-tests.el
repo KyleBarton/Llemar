@@ -261,35 +261,36 @@ BUFFER is bound to the conversation buffer inside BODY."
     (should (llemar-test--folded-p (save-excursion (forward-line 1) (point))))))
 
 (defun llemar-test--assert-tool-subtrees-folded ()
-  "Assert ordinary tools collapse while edit/write previews stay visible."
-  (goto-char (point-min))
-  (while (re-search-forward "^\\*\\*\\* " nil t)
-    (beginning-of-line)
-    (should-not (llemar-test--folded-p (point)))
-    (let ((preview (member (org-get-heading t t t t) '("edit" "write")))
-          (end (save-excursion (org-end-of-subtree t t) (point))))
-      (forward-line 1)
-      (while (< (point) end)
-        ;; The legacy replay diagnostic is appended outside the tool output.
-        (unless (or (looking-at-p "^[ \t]*$")
-                    (looking-at-p "^# raw session history unavailable;"))
-          (if preview
-              (when (looking-at-p "^#\\+begin_")
-                (should-not (llemar-test--folded-p (point))))
-            (should (llemar-test--folded-p (point)))))
-        (forward-line 1)))))
+  "Assert ordinary tool drawers fold while edit/write previews stay visible."
+  (let ((drawers (org-element-map (org-element-parse-buffer) 'drawer
+                   (lambda (drawer) drawer))))
+    (dolist (drawer drawers)
+      (let ((name (org-element-property :drawer-name drawer)))
+        (unless (member name '("THINKING" "STEERING"))
+          (goto-char (org-element-property :begin drawer))
+          (should-not (llemar-test--folded-p (point)))
+          (forward-line 1)
+          (let ((end (org-element-property :contents-end drawer))
+                (preview (member name '("EDIT" "WRITE"))))
+            (while (< (point) end)
+              (unless (looking-at-p "^[ \t]*$")
+                (if preview
+                    (when (looking-at-p "^#\\+begin_")
+                      (should-not (llemar-test--folded-p (point))))
+                  (should (llemar-test--folded-p (point)))))
+              (forward-line 1))))))))
 
 (ert-deftest llemar-test-tool-subtrees-folded-live ()
   "Live parallel calls hide all contents, including delimiters and timing."
   (llemar-test-with-conversation "parallel" "go"
-    (should (= (how-many "^\\*\\*\\* " (point-min) (point-max)) 2))
+    (should (= (how-many "^:BASH:$\\|^:READ_FILE:$" (point-min) (point-max)) 2))
     (should (string-match-p "# 44ms" (buffer-string)))
     (llemar-test--assert-tool-subtrees-folded)))
 
 (ert-deftest llemar-test-folding-leaves-structure-visible ()
   "Conversation headings and assistant prose stay visible."
   (llemar-test-with-conversation "basic" "go"
-    (dolist (regexp '("^\\*\\* User$" "^\\*\\* Assistant$" "^\\*\\*\\* bash$"
+    (dolist (regexp '("^\\*\\* User$" "^\\*\\* Assistant$" "^\\*\\*\\* Tools$"
                       "^:THINKING:$"
                       "Here is the plan\\." "Two files\\. Done\\."))
       (llemar-test--goto regexp)
@@ -311,8 +312,8 @@ could silently vanish."
   (let ((llemar-fold-thinking nil)
         (llemar-fold-blocks nil))
     (llemar-test-with-conversation "basic" "go"
-      (llemar-test--goto "^\\*\\*\\* bash$")
-      (org-show-subtree)
+      (llemar-test--goto "^:BASH:$")
+      (org-fold-hide-drawer-toggle nil t)
       (llemar-test--goto "^:THINKING:$")
       (should-not (llemar-test--folded-p
                    (save-excursion (forward-line 1) (point))))
@@ -322,17 +323,103 @@ could silently vanish."
 
 ;;;; Org structure
 
+(ert-deftest llemar-test-grouping-category-transitions ()
+  "One response groups categories, with separate message trees and drawers."
+  (llemar-test-with-conversation "grouping" "go"
+    (should (equal (llemar-test--headings)
+                   '("Current" "User" "Assistant" "Thinking"
+                     "Messages" "Message" "Message" "Tools"
+                     "Thinking" "Messages" "Message" "User")))
+    (dolist (label '("THINKING" "BASH" "READ"))
+      (goto-char (point-min))
+      (while (re-search-forward (format "^:%s:$" label) nil t)
+        (should (llemar-test--folded-p
+                 (save-excursion (forward-line 1) (point))))))
+    (dolist (text '("First message" "Second message" "Final message"))
+      (llemar-test--goto text)
+      (should-not (llemar-test--folded-p (point))))
+    (llemar-test--goto "^:BASH:$")
+    (should (search-forward "bash result" nil t))
+    (should (search-forward ":END:" nil t))
+    (should (search-forward ":READ:" nil t))
+    (should (search-forward "read result" nil t))
+    ;; A second submission creates a separate Assistant response.
+    (goto-char (point-max))
+    (insert "again\n")
+    (llemar-send)
+    (llemar-test--settle)
+    (should (= 2 (how-many "^\\*\\* Assistant$" (point-min) (point-max))))))
+
+(ert-deftest llemar-test-grouping-replay-matches-live ()
+  "Replay reconstructs the live category and individual message outline."
+  (let (live-headings)
+    (llemar-test-with-conversation "grouping" "go"
+      (setq live-headings (llemar-test--headings)))
+    (let* ((llemar-executable llemar-test-mock)
+           (llemar-extra-args '("grouping"))
+           (buffer (llemar--resume-conversation llemar-test-directory "saved")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (llemar-test--wait
+                     (lambda () (string-match-p "raw session history unavailable" (buffer-string)))
+                     llemar--process))
+            (should (equal live-headings (llemar-test--headings)))
+            (llemar-test--assert-tool-subtrees-folded)
+            (goto-char (point-min))
+            (while (re-search-forward "^:THINKING:$" nil t)
+              (should (llemar-test--folded-p
+                       (save-excursion (forward-line 1) (point))))))
+        (kill-buffer buffer)))))
+
+(ert-deftest llemar-test-grouping-manual-expansion-survives-result ()
+  "A late result does not refold a tool drawer the user expanded."
+  (let ((original (symbol-function 'llemar--handle-message-update)))
+    (cl-letf (((symbol-function 'llemar--handle-message-update)
+               (lambda (event &optional raw)
+                 (funcall original event raw)
+                 (when (equal (alist-get 'content event) "Final message.")
+                   (save-excursion
+                     (llemar-test--goto "^:BASH:$")
+                     (org-fold-hide-drawer-toggle nil t))))))
+      (llemar-test-with-conversation "grouping" "go"
+        (llemar-test--goto "^:BASH:$")
+        (should (search-forward "#+begin_example" nil t))
+        (beginning-of-line)
+        (should-not (llemar-test--folded-p (point)))
+        (should (search-forward "bash result" nil t))))))
+
+(ert-deftest llemar-test-grouping-drawer-delimiters-are-literal ()
+  "Thinking and tool content cannot close their containing drawers."
+  (llemar-test-with-conversation "drawer-escape" "go"
+    (let ((drawers (org-element-map (org-element-parse-buffer) 'drawer
+                     (lambda (drawer) drawer))))
+      (should (= 2 (length drawers)))
+      (cl-mapc
+       (lambda (drawer text)
+         (should (string-match-p
+                  text (buffer-substring-no-properties
+                        (org-element-property :contents-begin drawer)
+                        (org-element-property :contents-end drawer)))))
+       drawers '("Still thinking" "Still output")))
+    (dolist (text '("Still thinking" "Still output"))
+      (llemar-test--goto text)
+      (should (llemar-test--folded-p (point))))
+    (llemar-test--goto "Visible answer")
+    (should-not (llemar-test--folded-p (point)))))
+
 (ert-deftest llemar-test-conversation-tree ()
   "Each turn is its own headline, with tool calls nested under it."
   (llemar-test-with-conversation "basic" "go"
     (should (equal (llemar-test--headings)
-                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))))
+                   '("Current" "User" "Assistant" "Thinking" "Messages" "Message"
+                     "Tools" "Messages" "Message" "User")))))
 
 (ert-deftest llemar-test-hostile-prose-makes-no-headlines ()
   "Markdown bold and bullets at column 0 cannot become headlines."
   (llemar-test-with-conversation "basic" "go"
     (should (equal (llemar-test--headings)
-                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))
+                   '("Current" "User" "Assistant" "Thinking" "Messages" "Message"
+                     "Tools" "Messages" "Message" "User")))
     (should (string-match-p "^ \\*\\*Step one\\*\\*: look around\\.$"
                             (buffer-string)))))
 
@@ -359,7 +446,8 @@ interrupts."
     (llemar-steer "please focus")
     (should-not (member "Steering" (llemar-test--headings)))
     (should (equal (llemar-test--headings)
-                   '("Current" "User" "Assistant" "bash" "Assistant" "User")))
+                   '("Current" "User" "Assistant" "Thinking" "Messages" "Message"
+                     "Tools" "Messages" "Message" "User")))
     (llemar-test--goto "^:STEERING:$")
     (llemar-test--goto "please focus")
     (should (org-element-parse-buffer))))
@@ -376,12 +464,12 @@ interrupts."
   "Each result lands under its own tool headline, whatever the order."
   (llemar-test-with-conversation "parallel" "go"
     (should (equal (llemar-test--headings)
-                   '("Current" "User" "Assistant" "bash" "read_file" "User")))
+                   '("Current" "User" "Assistant" "Messages" "Message" "Tools" "User")))
     (dolist (probe '(("bash" . "line 1") ("read_file" . "An LL(m)")))
-      (llemar-test--goto (format "^\\*\\*\\* %s$" (car probe)))
+      (llemar-test--goto (format "^:%s:$" (upcase (car probe))))
       (let ((limit (save-excursion
                      (forward-line 1)
-                     (or (re-search-forward "^\\*+ " nil t) (point-max)))))
+                     (or (re-search-forward "^:END:$" nil t) (point-max)))))
         (should (save-excursion (search-forward (cdr probe) limit t)))))))
 
 (ert-deftest llemar-test-tool-output-is-truncated ()
@@ -415,7 +503,7 @@ They are distinct values on the wire and must not collapse together."
   "Conversations are nested beneath Current even before compaction."
   (llemar-test-with-conversation "basic" "go"
     (should (string-match-p "^\\* Current\n\\*\\* User" (buffer-string)))
-    (should (string-match-p "^\\*\\*\\* bash$" (buffer-string)))))
+    (should (string-match-p "^:BASH:$" (buffer-string)))))
 
 (ert-deftest llemar-test-compaction-manual-preserves-draft ()
   "Manual compaction archives only the removed prefix, keeping a draft."
@@ -430,18 +518,34 @@ They are distinct values on the wire and must not collapse together."
              (lambda () (string-match-p "^\\* Compacted " (buffer-string)))
              llemar--process))
     (should (equal (llemar-test--headings)
-                   '("Compacted 2026-01-02 03:04:05 +0000" "Source" "User" "Assistant" "bash"
-                     "Summary" "Current" "Assistant" "User")))
-    (should (string-match-p "^\\*\\*\\*\\* bash$" (buffer-string)))
+                   '("Compacted 2026-01-02 03:04:05 +0000" "Source" "User" "Assistant"
+                     "Messages" "Message" "Tools" "Summary" "Current" "Assistant"
+                     "Messages" "Message" "User")))
+    (should (string-match-p "^:BASH:$" (buffer-string)))
     (should (string-match-p "^,\\* not a heading$" (buffer-string)))
     (should (string-match-p "^,#\\+end_example$" (buffer-string)))
-    (should (string-match-p "^\\*\\*\\* Assistant\nOriginal answer" (buffer-string)))
-    (should (string-match-p "^\\*\\* Assistant\nRetained answer" (buffer-string)))
+    (should (string-match-p "^\\*\\*\\*\\*\\* Message\nOriginal answer" (buffer-string)))
+    (llemar-test--goto "Retained answer")
+    (should (equal (org-get-outline-path t)
+                   '("Current" "Assistant" "Messages" "Message")))
     (should (string-match-p "Remember the old exchange" (buffer-string)))
     (should (equal (string-trim (buffer-substring-no-properties
                                  (car (llemar--last-prompt-bounds)) (point-max)))
                    "unsent draft"))
     (should-not llemar--status)))
+
+(ert-deftest llemar-test-compaction-splits-messages-section ()
+  "Compaction inside Messages reconstructs both retained ancestor headings."
+  (llemar-test-with-conversation "compact-same" "go"
+    (llemar-compact)
+    (llemar-test--settle)
+    (should (llemar-test--wait
+             (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
+    (llemar-test--goto "Retained answer")
+    (should (equal (org-get-outline-path t)
+                   '("Current" "Assistant" "Messages" "Message")))
+    (should (= 1 (how-many "Original answer" (point-min) (point-max))))
+    (should (= 1 (how-many "Retained answer" (point-min) (point-max))))))
 
 (ert-deftest llemar-test-compaction-missing-boundary-is-explicit ()
   "Unknown boundaries show the real summary without claiming to archive source."
@@ -528,7 +632,16 @@ They are distinct values on the wire and must not collapse together."
     (should (llemar-test--wait
              (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
     (llemar-test--goto "^\\* Current$")
-    (should (search-forward "Continued after compaction" nil t))))
+    (should (search-forward "Continued after compaction" nil t))
+    (should (equal (org-get-outline-path t)
+                   '("Current" "Assistant" "Messages" "Message")))))
+
+(ert-deftest llemar-test-compaction-retain-none-before-new-message ()
+  "Generation arriving after a retain-none archive opens fresh ancestors."
+  (llemar-test-with-conversation "compact-auto-deferred" "go"
+    (llemar-test--goto "Continued after compaction")
+    (should (equal (org-get-outline-path t)
+                   '("Current" "Assistant" "Messages" "Message")))))
 
 (ert-deftest llemar-test-compaction-failure-keeps-source ()
   "Failure and cancellation do not archive any source."
@@ -555,7 +668,9 @@ They are distinct values on the wire and must not collapse together."
           (should (llemar-test--wait
                    (lambda () (member "Summary" (llemar-test--headings))) llemar--process))
           (should (string-match-p "Original answer" (buffer-string)))
-          (should (string-match-p "^\\*\\* Assistant\nRetained answer" (buffer-string))))
+          (llemar-test--goto "Retained answer")
+          (should (equal (org-get-outline-path t)
+                         '("Current" "Assistant" "Messages" "Message"))))
       (kill-buffer buffer))))
 
 ;;;; Session events
@@ -921,7 +1036,8 @@ They are distinct values on the wire and must not collapse together."
                    llemar--process))
           ;; The system message is skipped; each turn is its own heading.
           (should (equal (llemar-test--headings)
-                         '("Current" "User" "Assistant" "bash" "Assistant" "User")))
+                         '("Current" "User" "Assistant" "Thinking" "Messages" "Message"
+                           "Tools" "Messages" "Message" "User")))
           (should (string-match-p "Summarise the repo" (buffer-string)))
           (should (string-match-p "README.md" (buffer-string)))
           (should (string-match-p "^:THINKING:$" (buffer-string)))
@@ -949,7 +1065,7 @@ They are distinct values on the wire and must not collapse together."
     (forward-line 1)
     (should-not (llemar-test--folded-p (point)))
     (org-back-to-heading t)
-    (should (equal (org-get-heading t t t t) "edit")))
+    (should (equal (org-get-heading t t t t) "Tools")))
   (should (string-match-p "edit-ok" (buffer-string)))
   (should (string-match-p "edit-error" (buffer-string)))
   (should (string-match-p "edit-legacy" (buffer-string))))
@@ -998,7 +1114,7 @@ They are distinct values on the wire and must not collapse together."
       (forward-line 1)
       (should-not (llemar-test--folded-p (point)))
       (org-back-to-heading t)
-      (should (equal (org-get-heading t t t t) "write"))))
+      (should (equal (org-get-heading t t t t) "Tools"))))
   (dolist (path '("example.el" "failed.el" "empty.el" "invalid.el"))
     (should (string-match-p (regexp-quote path) (buffer-string))))
   (should (= (how-many "Proposed file contents" (point-min) (point-max)) 4))
@@ -1023,7 +1139,7 @@ They are distinct values on the wire and must not collapse together."
         (should (string-match-p text (buffer-string))))
       (llemar-test--goto "^#\\+begin_example error")
       (org-back-to-heading t)
-      (should (equal (org-get-heading t t t t) "write")))))
+      (should (equal (org-get-heading t t t t) "Tools")))))
 
 (ert-deftest llemar-test-write-diff-replay ()
   "Saved write arguments render without patches or filesystem reads."
@@ -1059,7 +1175,7 @@ They are distinct values on the wire and must not collapse together."
           (should (= (with-current-buffer (window-buffer target)
                        (line-number-at-pos (window-point target))) 2))))
       (should (= (how-many "^:LLEMAR_ERROR:" (point-min) (point-max)) 1))
-      (should (member "open_buffer" (llemar-test--headings)))
+      (should (string-match-p "^:OPEN_BUFFER:$" (buffer-string)))
       (should (string-match-p "line.*out of range" (buffer-string)))
       (should (< (string-match-p ":LLEMAR_ERROR:" (buffer-string))
                  (car (llemar--last-prompt-bounds)))))))

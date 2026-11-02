@@ -91,12 +91,17 @@ A transcript looks like this:
 What files are here?
 
 ** Assistant
+*** Thinking
 :THINKING:
 Let me check the repo.
 :END:
+
+*** Messages
+**** Message
 Here is the plan.
 
-*** bash
+*** Tools
+:BASH:
 #+begin_src json
 {
   "command": "ls -la"
@@ -106,21 +111,32 @@ Here is the plan.
 README.md
 llemar.el
 #+end_example
+:END:
 
-** Assistant
+*** Messages
+**** Message
 Two files. Done.
 
 ** User
 ```
 
-Each assistant turn is its own `** Assistant` heading, with tool calls nested
-beneath the turn that made them. Tool headings start fully collapsed for both
-live output and resumed history; `TAB` expands them. Edit and write headings
-stay open to keep diff previews visible. Thinking drawers and ordinary tool
-blocks also collapse as they complete. Org
-applies `#+startup:` visibility only when a buffer is first visited, which is
-long before a reply streams in, so llemar folds this content explicitly. `llemar-mode` derives from `org-mode`, so
-folding, links, export, and `C-x C-w` all work as usual.
+A complete assistant response, including tool round trips, shares one
+`** Assistant` heading. Chronological `*** Messages`, `*** Tools`, and
+`*** Thinking` sections appear only when the content category changes.
+Each assistant message has its own `**** Message` subtree; tool calls and
+thinking use drawers instead of individual headings.
+
+Ordinary tool drawers start folded in live output and resumed history;
+`TAB` expands them. `:EDIT:` and `:WRITE:` drawers stay expanded to keep
+diff previews visible. Thinking drawers fold when complete by default.
+Argument/result blocks also retain their own folding behavior. Section
+headings remain open, so they do not hide expanded previews.
+
+Org applies `#+startup:` visibility only when a buffer is first visited,
+long before a reply streams in, so Llemar folds streamed content explicitly.
+`llemar-mode` derives from `org-mode`, so folding, links, export, and
+`C-x C-w` all work as usual. Response text still receives structural escaping;
+agent-authored Org is a separate planned feature.
 
 ### Conversation mode line
 

@@ -117,6 +117,60 @@ def scenario_basic():
     settle()
 
 
+def scenario_grouping():
+    begin()
+    thinking(["First thought."])
+    assistant_text(["First message."], index=1)
+    end_message()
+    emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    assistant_text(["Second message."])
+    tool_call("group-a", "bash", {"command": "true"}, 1)
+    tool_call("group-b", "read", {"path": "README.md"}, 2)
+    end_message()
+    emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    thinking(["Second thought."])
+    assistant_text(["Final message."], index=1)
+    # Late, out-of-order results must stay in their original drawers.
+    tool_result("group-b", "read", "read result")
+    tool_result("group-a", "bash", "bash result")
+    end_message()
+    settle()
+
+
+def messages_grouping():
+    return [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "First thought."},
+            {"type": "text", "text": "First message."}]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "Second message."},
+            {"type": "toolCall", "id": "group-a", "name": "bash",
+             "arguments": {"command": "true"}},
+            {"type": "toolCall", "id": "group-b", "name": "read",
+             "arguments": {"path": "README.md"}}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "Second thought."},
+            {"type": "text", "text": "Final message."}]},
+        {"role": "toolResult", "toolCallId": "group-b", "toolName": "read",
+         "content": [{"type": "text", "text": "read result"}]},
+        {"role": "toolResult", "toolCallId": "group-a", "toolName": "bash",
+         "content": [{"type": "text", "text": "bash result"}]},
+    ]
+
+
+def scenario_drawer_escape():
+    begin()
+    thinking(["Literal delimiter:\n:EN", "D:\nStill thinking."])
+    tool_call("escape", "bash", {"command": "true"}, 1)
+    end_message()
+    tool_result("escape", "bash", "Literal delimiter:\n:END:\nStill output.")
+    emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    assistant_text(["Visible answer."])
+    end_message()
+    settle()
+
+
 def scenario_title_review():
     message = {"role": "custom", "customType": "llemar-session-title-review",
                "content": "Session-title check: hidden reminder sentinel",
@@ -255,7 +309,7 @@ def compact_event(reason):
     entry_id = f"compact-{count + 1}"
     if scenario_name == "compact-unknown":
         result["firstKeptEntryId"] = "unavailable-boundary"
-    if count or scenario_name in ("compact-auto-none", "compact-before"):
+    if count or scenario_name in ("compact-auto-none", "compact-before", "compact-auto-deferred"):
         result["firstKeptEntryId"] = entry_id  # Retain none on the second pass.
     COMPACTION_ENTRIES.append(dict(result, type="compaction", id=entry_id,
                                    parentId=COMPACTION_ENTRIES[-1]["id"],
@@ -288,18 +342,21 @@ def scenario_compaction():
         emit({"type": "message_start", "message": message})
         if role == "assistant":
             assistant_text([text])
-        if entry_id == "answer":
+        if entry_id == "answer" and scenario_name != "compact-same":
             message["content"].append({"type": "toolCall", "id": "archive-tool",
                                        "name": "bash", "arguments": {"command": "ls"}})
             tool_call("archive-tool", "bash", {"command": "ls"}, 1)
             tool_result("archive-tool", "bash", HOSTILE_OUTPUT)
         emit({"type": "message_end", "message": message})
-        if entry_id == "answer":
+        if entry_id == "answer" and scenario_name != "compact-same":
             COMPACTION_ENTRIES.append({"type": "message", "id": "tool-result",
                                        "parentId": "answer",
                                        "message": {"role": "toolResult", "toolCallId": "archive-tool",
                                                    "toolName": "bash", "timestamp": 102.5,
                                                    "content": [{"type": "text", "text": HOSTILE_OUTPUT}]}})
+    if scenario_name == "compact-auto-deferred":
+        compact_event("overflow")
+        return  # Continue only after the frontend has archived the source.
     if scenario_name in ("compact-auto", "compact-auto-none"):
         compact_event("overflow")
         assistant_text(["Continued after compaction.\n"])
@@ -354,9 +411,13 @@ def scenario_open_buffer():
 
 
 SCENARIOS = {
+    "grouping": scenario_grouping,
+    "drawer-escape": scenario_drawer_escape,
     "compact-manual": scenario_compaction,
+    "compact-same": scenario_compaction,
     "compact-auto": scenario_compaction,
     "compact-auto-none": scenario_compaction,
+    "compact-auto-deferred": scenario_compaction,
     "compact-unknown": scenario_compaction,
     "compact-before": scenario_compaction,
     "compact-fail": scenario_compaction,
@@ -379,6 +440,7 @@ SCENARIOS = {
 }
 
 MESSAGE_SCRIPTS = {
+    "grouping": messages_grouping,
     "write": messages_write,
     "resume": messages_resume,
     "edit": messages_edit,
@@ -440,6 +502,11 @@ def main():
             emit({"id": request, "type": "response", "command": kind,
                   "success": True, "data": {"entries": COMPACTION_ENTRIES,
                   "leafId": COMPACTION_ENTRIES[-1]["id"] if COMPACTION_ENTRIES else None}})
+            if scenario == "compact-auto-deferred":
+                emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+                assistant_text(["Continued after compaction.\n"])
+                end_message()
+                settle()
         elif kind == "get_messages":
             builder = MESSAGE_SCRIPTS.get(scenario)
             emit({"id": request, "type": "response", "command": "get_messages",

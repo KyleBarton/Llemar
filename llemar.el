@@ -130,6 +130,18 @@ A window scrolled up to read earlier output is left undisturbed."
 (defvar-local llemar--insert-marker nil
   "Marker where streamed assistant output is appended.")
 
+(defvar-local llemar--assistant-open nil
+  "Non-nil while rendering a grouped assistant response.")
+
+(defvar-local llemar--category nil
+  "Current chronological category within the assistant response.")
+
+(defvar-local llemar--message-open nil
+  "Non-nil when this backend message has an open prose subtree.")
+
+(defvar-local llemar--message-boundary nil
+  "Start position of the backend message currently being rendered.")
+
 (defvar-local llemar--tool-markers nil
   "Hash table mapping a tool call id to a marker in this buffer.")
 
@@ -140,7 +152,7 @@ A window scrolled up to read earlier output is left undisturbed."
   "Counter used to mint unique RPC request ids.")
 
 (defvar-local llemar--message-markers nil
-  "Message identities mapped to their rendered heading markers.")
+  "Message identities mapped to exact rendered boundary markers.")
 
 (defvar-local llemar--pending-user-marker nil
   "Heading of a submitted prompt not yet consumed by pi.")
@@ -484,9 +496,9 @@ CALLBACK, if given, is called in this buffer with the response record."
     (setq llemar--insert-marker (copy-marker (point-max) t)))
   llemar--insert-marker)
 
-(defun llemar--insert (marker text)
+(defun llemar--insert (marker text &optional drawer)
   "Insert TEXT at MARKER, keeping org structure intact.
-
+With DRAWER non-nil, also escape literal drawer closing delimiters.
 Any line of TEXT that would begin a new headline at column 0 is
 prefixed with a space, so assistant prose such as a markdown \"**bold**\"
 run cannot silently restructure the document."
@@ -500,6 +512,8 @@ run cannot silently restructure the document."
           (while (< (point) marker)
             (when (and (bolp) (eq (char-after) ?*))
               (insert " "))
+            (when (and drawer (looking-at-p "[ \t]*:END:[ \t]*$"))
+              (insert ","))
             (forward-line 1)))
         (set-marker scan nil)))))
 
@@ -531,10 +545,11 @@ run cannot silently restructure the document."
 (defun llemar--escape-block-body (text)
   "Escape TEXT so it cannot escape the org block containing it.
 
-Inside a block, org still scans for headlines and for block terminators,
-so lines beginning with asterisks or `#+\=' are escaped with a leading
-comma.  Org strips that comma again on display and export."
-  (replace-regexp-in-string "^\\(,*\\(?:\\*+\\|#\\+\\)\\)" ",\\1" text))
+Inside a block, org still scans for headlines, block terminators, and
+closing delimiters of enclosing drawers.  Escape these with a leading
+comma.  Org strips the headline and block escapes on display and export."
+  (replace-regexp-in-string
+   "^\\(,*\\(?:\\*+\\|#\\+\\|[ \t]*:END:[ \t]*$\\)\\)" ",\\1" text))
 
 (defun llemar--truncate (text max-lines)
   "Truncate TEXT to MAX-LINES lines, noting how much was dropped."
@@ -709,28 +724,26 @@ Shorten the quoted title first, then identity; keep the turn visible."
 ;;;; Tool call rendering
 
 (defun llemar--tool-marker (tool-call-id &optional tool-name)
-  "Return the marker where output for TOOL-CALL-ID belongs.
-Create a heading named TOOL-NAME if this tool call has not been seen.
-
-A tool\='s arguments and its result arrive separately, and several tools
-can be in flight at once, so each call keeps its own marker.  Markers
-that share a position and advance on insertion would all move together,
-which would file one tool\='s result under another tool\='s heading.  A
-blank line after the heading keeps this call\='s marker strictly before
-the shared insertion marker so the two cannot be confused."
+  "Return the insertion marker inside TOOL-CALL-ID's drawer.
+Create a drawer named TOOL-NAME under Tools for a new call.  Each marker
+stays before its closing delimiter, keeping out-of-order results owned
+by their call.  Edit and write drawers remain expanded."
   (or (gethash tool-call-id llemar--tool-markers)
-      (let ((marker (llemar--marker)))
-        (llemar--insert-heading marker 3 (or tool-name "tool"))
-        (let ((section (marker-position marker)))
+      (progn
+        (llemar--ensure-category "Tools")
+        (let ((marker (llemar--marker)))
+          (llemar--insert-newline marker)
           (save-excursion
             (goto-char marker)
-            (insert "\n")
-            (unless (member tool-name '("edit" "write"))
-              (org-back-to-heading t)
-              (org-fold-hide-subtree)))
-          (let ((own (copy-marker section t)))
-            (puthash tool-call-id own llemar--tool-markers)
-            own)))))
+            (let ((start (point)))
+              (insert ":" (upcase (or tool-name "tool")) ":\n")
+              (let ((position (point)))
+                (insert "\n:END:\n")
+                (let ((own (copy-marker position t)))
+                  (puthash tool-call-id own llemar--tool-markers)
+                  (unless (member tool-name '("edit" "write"))
+                    (llemar--fold start 'drawer))
+                  own))))))))
 
 (defun llemar--render-tool-arguments (id name args)
   "Render ARGS for tool call ID named NAME.
@@ -940,7 +953,7 @@ RAW is the JSON line RECORD was parsed from."
          (setq llemar--run-error nil)
          ;; Content indices restart with each message.
          (clrhash llemar--streamed-blocks)
-         (llemar--open-assistant))
+         (llemar--begin-message))
        (llemar--remember-message message)
        (when (equal role "user")
          (when llemar--pending-user-marker
@@ -979,6 +992,7 @@ RAW is the JSON line RECORD was parsed from."
      (llemar--refresh-stats)
      (when (alist-get 'aborted record)
        (llemar--note "aborted"))
+     (setq llemar--assistant-open nil llemar--category nil)
      (llemar--open-user-prompt)
      (llemar--save-transcript))
     ("auto_retry_start"
@@ -1021,13 +1035,31 @@ RAW is the JSON line RECORD was parsed from."
     (_ nil)))
 
 (defun llemar--open-assistant ()
-  "Open a heading for one assistant turn.
+  "Ensure a heading exists for the grouped assistant response."
+  (unless llemar--assistant-open
+    (llemar--insert-heading (llemar--marker) 2 llemar-assistant-heading)
+    (setq llemar--assistant-open t llemar--category nil)))
 
-Every assistant message gets its own heading.  That keeps tool calls
-nested under the turn that made them, and means prose the agent emits
-after a tool result starts a new turn instead of landing inside the
-tool\='s subtree."
-  (llemar--insert-heading (llemar--marker) 2 llemar-assistant-heading))
+(defun llemar--begin-message ()
+  "Record a backend message boundary without opening a prose heading yet."
+  (llemar--insert-newline (llemar--marker))
+  (setq llemar--message-boundary (marker-position (llemar--marker))
+        llemar--message-open nil)
+  (llemar--open-assistant))
+
+(defun llemar--ensure-category (category)
+  "Open CATEGORY only when the chronological content type changes."
+  (llemar--open-assistant)
+  (unless (equal category llemar--category)
+    (llemar--insert-heading (llemar--marker) 3 category)
+    (setq llemar--category category llemar--message-open nil)))
+
+(defun llemar--ensure-message ()
+  "Ensure assistant prose has its own Message subtree."
+  (llemar--ensure-category "Messages")
+  (unless llemar--message-open
+    (llemar--insert-heading (llemar--marker) 4 "Message")
+    (setq llemar--message-open t)))
 
 (defun llemar--handle-message-update (event &optional raw)
   "Render a streaming assistant message EVENT.
@@ -1036,24 +1068,27 @@ exactly as the agent sent them."
   (let ((marker (llemar--marker)))
     (pcase (alist-get 'type event)
       ("text_delta"
+       (llemar--ensure-message)
        (puthash (alist-get 'contentIndex event) t llemar--streamed-blocks)
        (llemar--insert marker (alist-get 'delta event)))
       ("text_end"
        ;; Providers that do not stream send no deltas; use the final content.
        (unless (gethash (alist-get 'contentIndex event) llemar--streamed-blocks)
+         (llemar--ensure-message)
          (llemar--insert marker (alist-get 'content event))))
       ("thinking_start"
        (when llemar-show-thinking
+         (llemar--ensure-category "Thinking")
          (llemar--insert-newline marker)
          (save-excursion (goto-char marker) (insert ":THINKING:\n"))))
       ("thinking_delta"
        (when llemar-show-thinking
          (puthash (alist-get 'contentIndex event) t llemar--streamed-blocks)
-         (llemar--insert marker (alist-get 'delta event))))
+         (llemar--insert marker (alist-get 'delta event) t)))
       ("thinking_end"
        (when llemar-show-thinking
          (unless (gethash (alist-get 'contentIndex event) llemar--streamed-blocks)
-           (llemar--insert marker (alist-get 'content event)))
+           (llemar--insert marker (alist-get 'content event) t))
          (llemar--insert-newline marker)
          (save-excursion (goto-char marker) (insert ":END:\n"))
          (when llemar-fold-thinking
@@ -1075,7 +1110,7 @@ exactly as the agent sent them."
       (_ nil))))
 
 (defun llemar--render-tool-result (record)
-  "Insert the tool result carried by RECORD under its tool heading."
+  "Insert the tool result carried by RECORD inside its tool drawer."
   (let* ((id (alist-get 'toolCallId record))
          (marker (llemar--tool-marker id (alist-get 'toolName record)))
          (text (llemar--result-text (alist-get 'result record)))
@@ -1131,9 +1166,10 @@ CONTENT is either a string or a list of content blocks."
 (defun llemar--replay-thinking (marker text)
   "Render a saved thinking block holding TEXT at MARKER."
   (when (and llemar-show-thinking text (not (string-empty-p text)))
+    (llemar--ensure-category "Thinking")
     (llemar--insert-newline marker)
     (save-excursion (goto-char marker) (insert ":THINKING:\n"))
-    (llemar--insert marker text)
+    (llemar--insert marker text t)
     (llemar--insert-newline marker)
     (save-excursion (goto-char marker) (insert ":END:\n"))
     (when llemar-fold-thinking
@@ -1150,17 +1186,21 @@ messages and other context-only roles are skipped so they do not become
 headings."
   (pcase (alist-get 'role message)
     ("user"
+     (setq llemar--assistant-open nil llemar--category nil)
      (let ((marker (llemar--marker)))
        (llemar--insert-heading marker 2 llemar-user-heading)
        (llemar--insert marker
                        (string-trim-right
                         (llemar--message-text (alist-get 'content message))))))
     ("assistant"
-     (llemar--open-assistant)
+     (llemar--begin-message)
+     (llemar--remember-message message)
      (let ((marker (llemar--marker)))
        (dolist (block (alist-get 'content message))
          (pcase (alist-get 'type block)
-           ("text" (llemar--insert marker (alist-get 'text block)))
+           ("text"
+            (llemar--ensure-message)
+            (llemar--insert marker (alist-get 'text block)))
            ("thinking"
             (llemar--replay-thinking marker (alist-get 'thinking block)))
            ("toolCall"
@@ -1178,7 +1218,8 @@ headings."
         (result . ((content . ,(alist-get 'content message))
                    (details . ,(alist-get 'details message)))))))
     (_ nil))
-  (llemar--remember-message message))
+  (unless (equal (alist-get 'role message) "assistant")
+    (llemar--remember-message message)))
 
 ;;;; Compaction archives
 
@@ -1188,19 +1229,20 @@ headings."
     (list (alist-get 'role message) (alist-get 'timestamp message))))
 
 (defun llemar--remember-message (message)
-  "Associate MESSAGE with its rendered user or assistant heading."
+  "Associate MESSAGE with its exact rendered boundary for compaction."
   (let ((role (alist-get 'role message))
         (key (llemar--message-key message)))
     (when (and key (member role '("user" "assistant")))
-      (save-excursion
-        (goto-char (llemar--marker))
-        (when (re-search-backward
-               (format "^\\*\\* %s[ \t]*$"
-                       (regexp-quote (if (equal role "user")
-                                         llemar-user-heading
-                                       llemar-assistant-heading))) nil t)
-          (puthash key (copy-marker (line-beginning-position) t)
-                   llemar--message-markers))))))
+      (if (equal role "assistant")
+          (puthash key (copy-marker llemar--message-boundary)
+                   llemar--message-markers)
+        (save-excursion
+          (goto-char (llemar--marker))
+          (when (re-search-backward
+                 (format "^\\*\\* %s[ \t]*$"
+                         (regexp-quote llemar-user-heading)) nil t)
+            (puthash key (copy-marker (line-beginning-position) t)
+                     llemar--message-markers)))))))
 
 (defun llemar--branch-entries (data)
   "Return DATA's entries on the active branch, oldest first."
@@ -1238,6 +1280,25 @@ headings."
                (llemar--save-transcript))
            (set-marker source-end nil)))))))
 
+(defun llemar--retained-ancestors (boundary)
+  "Return missing ancestor headings for content retained at BOUNDARY.
+A compaction can split a grouped response between backend messages."
+  (save-excursion
+    (goto-char boundary)
+    (skip-chars-forward " \t\n")
+    (let ((level (cond ((eobp) 0)
+                       ((looking-at "\\(\\*+\\) ") (length (match-string 1)))
+                       (t 5)))
+          category)
+      (when (> level 3)
+        (goto-char boundary)
+        (when (re-search-backward "^\\*\\*\\* \\(Messages\\|Thinking\\|Tools\\)$" nil t)
+          (setq category (match-string-no-properties 1))))
+      (append (when (> level 2) (list (cons 2 llemar-assistant-heading)))
+              (when category (list (cons 3 category)))
+              (when (and (> level 4) (equal category "Messages"))
+                (list (cons 4 "Message")))))))
+
 (defun llemar--archive-compaction (entry entries &optional source-end)
   "Archive the source prefix described by compaction ENTRY in ENTRIES.
 SOURCE-END bounds a live retain-none compaction before continued generation.
@@ -1266,7 +1327,13 @@ untouched and show the actual summary with an explicit limitation."
             (llemar--insert-block (llemar--marker) "#+begin_example" summary)))
       (let ((inhibit-read-only t)
             (end (copy-marker boundary t))
+            (ancestors (llemar--retained-ancestors boundary))
+            (retained-output (< boundary (llemar--marker)))
             (timestamp (alist-get 'timestamp entry)))
+        (maphash (lambda (_key marker)
+                   (when (= marker boundary)
+                     (set-marker-insertion-type marker t)))
+                 llemar--message-markers)
         (save-excursion
           ;; Demote only actual headlines.  Escaped output stays byte-for-byte
           ;; intact, and live markers continue to track retained tool output.
@@ -1289,13 +1356,20 @@ untouched and show the actual summary with an explicit limitation."
                     (alist-get 'id entry) "\n:END:\n"))
           (insert "** Source\n")
           (goto-char end)
-          ;; Boundary markers must follow these insertions to the retained
-          ;; heading, but this temporary insertion marker advances independently.
+          ;; Boundary markers follow these insertions to the retained content;
+          ;; the temporary insertion marker advances independently.
           (let ((marker (copy-marker (point) t)))
             (llemar--insert-heading marker 2 "Summary")
             (llemar--insert-block marker "#+begin_example" summary)
             (llemar--insert-heading marker 1 "Current")
+            (dolist (ancestor ancestors)
+              (llemar--insert-heading marker (car ancestor) (cdr ancestor)))
             (set-marker marker nil)))
+        (maphash (lambda (_key marker) (set-marker-insertion-type marker nil))
+                 llemar--message-markers)
+        (unless retained-output
+          (setq llemar--assistant-open nil llemar--category nil
+                llemar--message-open nil))
         (set-marker end nil)))
     (when current (set-marker current nil))))
 
@@ -1541,7 +1615,7 @@ Resuming suppresses it, then adds one after the history is rendered."
     (set-marker (llemar--marker) (point-max))
     (llemar--release-tool-markers)
     (clrhash llemar--streamed-blocks)
-    (setq llemar--busy t)
+    (setq llemar--busy t llemar--assistant-open nil llemar--category nil)
     (llemar--set-status "sending")
     (llemar--send `((type . "prompt") (message . ,text))
                   (lambda (response)
@@ -1616,6 +1690,7 @@ Wait for the current run to settle before requesting manual compaction."
            (llemar--cancel-displays)
            (erase-buffer)
            (setq llemar--busy nil llemar--compacting nil
+                 llemar--assistant-open nil llemar--category nil
                  llemar--pending-user-marker nil)
            (clrhash llemar--message-markers)
            (llemar--release-tool-markers)
