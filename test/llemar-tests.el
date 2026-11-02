@@ -243,6 +243,108 @@ BUFFER is bound to the conversation buffer inside BODY."
         (should (= (window-point window) start))
         (should (< start (with-current-buffer buffer (point-max))))))))
 
+(ert-deftest llemar-test-send-from-paragraph-follows-output ()
+  "Submitting mid-paragraph follows output without moving another window."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (insert "First sentence. Second sentence.\n")
+    (backward-char 10)
+    (let ((other (split-window-below)))
+      (set-window-buffer other conversation)
+      (set-window-point other (point-min))
+      (call-interactively 'llemar-send)
+      (should (= (point) (point-max)))
+      (should (= (window-point other) (point-min)))
+      (llemar-test--settle)
+      (should (= (point) (point-max)))
+      (should (= (window-point other) (point-min))))))
+
+(ert-deftest llemar-test-send-allows-scrolling-away ()
+  "After submitting, scrolling away still stops output following."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (insert "First sentence. Second sentence.\n")
+    (backward-char 10)
+    (llemar-send)
+    (should (= (point) (point-max)))
+    (goto-char (point-min))
+    (llemar-test--settle)
+    (should (= (point) (point-min)))))
+
+(ert-deftest llemar-test-send-moves-point-with-following-disabled ()
+  "Submission moves point even when subsequent output following is disabled."
+  (llemar-test-with-window-setup
+    (let ((llemar-follow-output nil))
+      (setq conversation (llemar llemar-test-directory))
+      (insert "First sentence. Second sentence.\n")
+      (backward-char 10)
+      (llemar-send)
+      (should (= (point) (point-max)))
+      (let ((start (point)))
+        (llemar-test--settle)
+        (should (= (point) start))
+        (should (< (point) (point-max)))))))
+
+(ert-deftest llemar-test-send-follows-after-evil-normal-cursor-adjustment ()
+  "Evil's normal-state adjustment to the final character still follows."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (insert "First sentence. Second sentence.")
+    (backward-char 10)
+    (cl-progv '(evil-local-mode evil-state evil-move-beyond-eol)
+        '(t normal nil)
+      (llemar-send)
+      ;; Model Evil's post-command adjustment at a non-empty end of line.
+      (backward-char)
+      (should (memq (selected-window) (llemar--windows-at-end)))
+      (llemar-test--settle)
+      (should (= (point) (point-max))))))
+
+(ert-deftest llemar-test-follow-end-tolerance-is-evil-normal-only ()
+  "Only Evil normal state treats the final non-newline character as the end."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (insert "Prompt text")
+    (backward-char)
+    (should-not (llemar--windows-at-end))
+    (cl-progv '(evil-local-mode evil-state evil-move-beyond-eol)
+        '(t insert nil)
+      (should-not (llemar--windows-at-end)))
+    (cl-progv '(evil-local-mode evil-state evil-move-beyond-eol)
+        '(t normal t)
+      (should-not (llemar--windows-at-end)))
+    (cl-progv '(evil-local-mode evil-state evil-move-beyond-eol)
+        '(t normal nil)
+      (backward-char)
+      (should-not (llemar--windows-at-end))
+      (goto-char (point-max))
+      (insert "\n")
+      (backward-char)
+      (should-not (llemar--windows-at-end)))))
+
+(ert-deftest llemar-test-rejected-send-preserves-point ()
+  "Empty, busy, compacting, and disconnected submissions leave point alone."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (insert "   \n")
+    (backward-char 2)
+    (let ((start (point)))
+      (should-error (llemar-send) :type 'user-error)
+      (should (= (point) start)))
+    (goto-char (point-max))
+    (insert "First sentence. Second sentence.\n")
+    (backward-char 10)
+    (let ((start (point)))
+      (let ((llemar--busy t))
+        (should-error (llemar-send) :type 'user-error))
+      (should (= (point) start))
+      (let ((llemar--compacting t))
+        (should-error (llemar-send) :type 'user-error))
+      (should (= (point) start))
+      (delete-process llemar--process)
+      (should-error (llemar-send) :type 'user-error)
+      (should (= (point) start)))))
+
 ;;;; Folding
 
 (ert-deftest llemar-test-thinking-drawer-is-folded ()

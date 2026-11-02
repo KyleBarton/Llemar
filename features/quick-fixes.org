@@ -56,7 +56,7 @@ Cover live output before results, success/failure results, resumed history,
 empty files, missing final newlines, whitespace, and Org escaping with
 deterministic offline tests.
 
-* TODO Move point to the buffer end when submitting a prompt
+* DONE Move point to the buffer end when submitting a prompt
 After a prompt is successfully submitted, move point in the submitting window
 to the end of the conversation buffer so =llemar-follow-output= can follow the
 response. This should work when =C-c C-c= is invoked from within a paragraph,
@@ -64,7 +64,11 @@ not just when point is already at the end.
 
 Preserve the ability to scroll away afterward, and do not move point in other
 windows viewing the conversation. Rejected or empty submissions should not
-move point. Write deterministic offline tests before implementing.
+move point. Covered by deterministic offline tests, including submission with
+following disabled and scrolling away before the reply finishes. Creating the
+next User prompt no longer forces point away from history. Evil normal state's
+post-command adjustment to the final character of a non-empty last line also
+counts as the end for following; insert state and earlier positions do not.
 
 * DONE Fully minimize tool-use headings by default
 Tool-use Org headings start fully folded, hiding their entire subtree,

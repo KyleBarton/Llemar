@@ -907,10 +907,17 @@ Other calls, including malformed write arguments, retain their JSON preview."
 
 (defun llemar--windows-at-end ()
   "Return windows showing this buffer whose point sits at its end.
-These are the windows that follow streamed output; a window scrolled up
-has its point before `point-max' and is excluded."
+These are the windows that follow streamed output.  In Evil normal state,
+the final character of a non-empty last line also counts as the end, since
+Evil moves point back from `point-max' after commands."
   (when llemar-follow-output
-    (let ((end (point-max))
+    (let ((end (if (and (bound-and-true-p evil-local-mode)
+                        (eq (bound-and-true-p evil-state) 'normal)
+                        (not (bound-and-true-p evil-move-beyond-eol))
+                        (> (point-max) (point-min))
+                        (not (eq (char-before (point-max)) ?\n)))
+                   (1- (point-max))
+                 (point-max)))
           (windows nil))
       (dolist (window (get-buffer-window-list (current-buffer) nil t))
         (when (>= (window-point window) end)
@@ -1481,14 +1488,12 @@ an abandoned branch.  A trailing unsent draft is restored with those archives."
         (cons start end)))))
 
 (defun llemar--open-user-prompt ()
-  "Append a fresh user heading and leave point ready for typing."
+  "Append a fresh user heading without moving point away from history."
   (let ((marker (llemar--marker)))
     (llemar--insert-newline marker)
     (save-excursion
       (goto-char marker)
-      (insert "\n** " llemar-user-heading "\n"))
-    (when (eq (current-buffer) (window-buffer (selected-window)))
-      (goto-char (point-max)))))
+      (insert "\n** " llemar-user-heading "\n"))))
 
 ;;;; Interactive commands
 
@@ -1599,7 +1604,8 @@ Resuming suppresses it, then adds one after the history is rendered."
     (insert "** " llemar-user-heading "\n")))
 
 (defun llemar-send ()
-  "Send the prompt under the last user heading to the agent."
+  "Send the prompt under the last user heading to the agent.
+Move point to the buffer end in the submitting window so output can follow."
   (interactive)
   (when (or llemar--busy llemar--compacting)
     (user-error "Agent is running; use `llemar-steer' or `llemar-abort'"))
@@ -1632,7 +1638,11 @@ Resuming suppresses it, then adds one after the history is rendered."
                       (when llemar--pending-user-marker
                         (set-marker llemar--pending-user-marker nil))
                       (setq llemar--busy nil llemar--pending-user-marker nil)
-                      (llemar--set-status nil))))))
+                      (llemar--set-status nil))))
+    ;; Only the submitting window should start following.  In particular,
+    ;; programmatic sends from another buffer must not move passive windows.
+    (when (eq (window-buffer (selected-window)) (current-buffer))
+      (goto-char (point-max)))))
 
 (defun llemar-compact (&optional custom-instructions)
   "Compact context on demand, optionally using CUSTOM-INSTRUCTIONS.
