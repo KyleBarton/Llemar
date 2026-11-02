@@ -1,0 +1,64 @@
+#+title: Resume from saved Org transcripts and explicitly redisplay history
+
+* TODO Use saved Org as the resume fast path
+Status: captured for future implementation; no runtime changes requested now.
+
+** Motivation
+Consult already previews the saved Org transcript, but selecting a session
+starts pi and reconstructs the conversation from =get_entries=, translating
+active-branch history (including pre-compaction source) back into Org.
+For ordinary Llemar sessions, this repeats work already represented in the
+saved transcript and may make resume unnecessarily expensive.
+
+An intermittent resume hang that clears after =C-g= prompted this discussion.
+History rendering is a possible cause, not a confirmed diagnosis; capture a
+backtrace on recurrence rather than treating this feature as a proven fix.
+
+** Agreed direction
+- Resume pi independently so its own session remains authoritative for agent
+  state and context. Loading Org must not replace or inject backend history.
+- Prefer loading a valid saved Org transcript into the conversation buffer
+  instead of fetching and re-rendering all entries on every resume.
+- Preserve local annotations and unsent drafts naturally through the saved
+  transcript where possible.
+- Initialize live insertion markers and assistant/category/turn state so new
+  output appends correctly; inserting the file alone is insufficient.
+- Fall back to reconstruction from pi history when the saved transcript is
+  missing, invalid, or does not match the resumed session.
+
+** Design questions
+- What metadata establishes that a transcript matches the session's active
+  branch and latest persisted state without fetching the entire history?
+- How should stale or interrupted saves, external pi changes, and older
+  transcripts without validation metadata be handled?
+- Which transient rendering state must be reconstructed from Org, and which
+  should be reset at a safe new-turn boundary?
+- What folding and window-position state should be preserved on load?
+
+* TODO Add interactive llemar-redisplay
+Provide an explicit =M-x llemar-redisplay= command that requests =get_entries=
+from pi and re-renders the current conversation's Org buffer from the active
+branch. This is the deliberate rebuild path, including when newer renderer
+behavior should be applied to an existing transcript.
+
+** Safety questions
+- Define how redisplay preserves or reconciles local archive annotations and
+  unsent input; do not silently discard user edits.
+- Decide whether redisplay requires an idle session and how it handles pending
+  RPC responses or output arriving during reconstruction.
+- Keep the existing display usable if fetching or rendering fails. Define
+  cancellation behavior and when the rebuilt transcript is saved.
+- Redisplay must not send a prompt, change pi's active branch, or alter the
+  model's context.
+
+* Suggested acceptance coverage
+Implementation should be test-driven with offline mock-pi scenarios.
+
+- A matching saved transcript resumes without full =get_entries= replay.
+- Missing, invalid, and stale transcripts take the documented fallback path.
+- Subsequent turns render in the correct location and structure after loading
+  saved Org, including transcripts containing compaction archives.
+- Local annotations and drafts survive according to the agreed policy.
+- =llemar-redisplay= requests entries and reproduces the active-branch display,
+  including pre-compaction source, without modifying backend conversation state.
+- Fetch failures and cancellation do not leave a destroyed or unusable buffer.
