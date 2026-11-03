@@ -389,6 +389,40 @@ BUFFER is bound to the conversation buffer inside BODY."
     (should (string-match-p "# 44ms" (buffer-string)))
     (llemar-test--assert-tool-subtrees-folded)))
 
+(ert-deftest llemar-test-late-tool-result-preserves-subtree-visibility ()
+  "Late results respect collapsed and manually expanded tool headings."
+  (dolist (expanded '(nil t))
+    (with-temp-buffer
+      (llemar-mode)
+      ;; Disable block folds so they cannot mask a missing subtree fold.
+      (let ((llemar-fold-blocks nil))
+        (llemar--render-tool-arguments "first" "bash" '((command . "first")))
+        (llemar--render-tool-arguments "second" "read" '((path . "README.md")))
+        (when expanded
+          (llemar-test--goto "^\\*\\*\\* bash$")
+          (org-fold-show-subtree))
+        (dolist (id '("second" "first"))
+          (llemar--render-tool-result
+           `((toolCallId . ,id)
+             (toolName . ,(if (equal id "first") "bash" "read"))
+             (result . ((content . (((type . "text") (text . "output"))))))
+             (isError . t)
+             (durationMs . 44))))
+        (llemar-test--goto "^\\*\\*\\* bash$")
+        (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+          (forward-line 1)
+          (while (< (point) end)
+            (unless (looking-at-p "^[ \t]*$")
+              (should (eq (not (llemar-test--folded-p (point))) expanded)))
+            (forward-line 1)))
+        (llemar-test--goto "^\\*\\*\\* read$")
+        (should-not (llemar-test--folded-p (point)))
+        (forward-line 1)
+        (should (llemar-test--folded-p (point)))
+        (llemar--insert-heading (llemar--marker) 2 "User")
+        (llemar-test--goto "^\\*\\* User$")
+        (should-not (llemar-test--folded-p (point)))))))
+
 (ert-deftest llemar-test-folding-leaves-structure-visible ()
   "Conversation headings and assistant prose stay visible."
   (llemar-test-with-conversation "basic" "go"
