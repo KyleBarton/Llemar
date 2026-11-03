@@ -29,19 +29,22 @@ created. Failed or cancelled compaction must not trigger this cleanup.
 Extend the offline compaction scenarios to cover this presentation change.
 See [[file:compaction.org][compaction history preservation]].
 
-* TODO Scope automatic paren and quotation pairing to the current heading
-Typing in a User prompt must not inherit unmatched quotes or parentheses from
-previous messages. Observed symptom: typing two quotation marks produces three
-(=\"\"\"=) because an earlier quotation mark in the backscroll is unmatched.
+* DONE Resolve automatic paren and quotation pairing across messages
+Identified =electric-pair-mode= with =electric-pair-preserve-balance= enabled
+in the user's live Llemar buffers. Isolated Org-mode tests reproduced extra
+quotes and closing parentheses caused by unmatched delimiters in history.
+Setting =electric-pair-preserve-balance= to =nil= buffer-locally fixed these
+cases while preserving ordinary pairing and skipping existing closing delimiters.
 
-Investigate which pairing/syntax mechanism is active in the user's Emacs before
-choosing a fix; do not assume the cause is =electric-pair-mode= rather than
-another pairing package. Limit the relevant editing context to the current
-message heading, without permanently narrowing the conversation or breaking
-Org navigation, folding, source-block editing, or normal transcript rendering.
-Cover unmatched quotes/parens in previous messages and normal pairing within
-the current prompt. Verify against the user's live configuration as well as
-deterministic offline tests.
+Resolved as a personal Emacs configuration matter, not a Llemar code change:
+#+begin_src emacs-lisp
+(add-hook 'llemar-mode-hook
+          (lambda ()
+            (setq-local electric-pair-preserve-balance nil)))
+#+end_src
+This disables balance preservation rather than restricting parsing to a heading.
+The configuration snippet has not been installed or applied to live buffers
+in this session; the user accepted closing the project item on this basis.
 
 * DONE Show diffs for write tool calls
 Display =write= arguments as a path plus a syntax-highlighted, additions-only
