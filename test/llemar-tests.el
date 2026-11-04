@@ -1238,6 +1238,91 @@ They are distinct values on the wire and must not collapse together."
   "`llemar-resume' is interactive."
   (should (commandp 'llemar-resume)))
 
+(ert-deftest llemar-test-resume-selects-active-current-session ()
+  "Selecting the current session preserves its buffer, process and draft."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (should (llemar-test--wait (lambda () llemar--session-id) llemar--process))
+    (insert "Unsent draft")
+    (let ((session (copy-tree (assoc llemar--session-id llemar-session-registry)))
+          (process llemar--process)
+          (contents (buffer-string))
+          (position (point)))
+      (cl-letf (((symbol-function 'llemar--resume-conversation)
+                 (lambda (&rest _) (ert-fail "Started duplicate session"))))
+        (should (eq (llemar-resume session) conversation)))
+      (should (eq llemar--process process))
+      (should (process-live-p process))
+      (should (equal (buffer-string) contents))
+      (should (= (point) position)))))
+
+(ert-deftest llemar-test-resume-selects-other-active-session ()
+  "Switching to an active session leaves both conversations intact."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (should (llemar-test--wait (lambda () llemar--session-id) llemar--process))
+    (let ((target conversation)
+          (session (copy-tree (assoc llemar--session-id llemar-session-registry)))
+          (process llemar--process)
+          other)
+      (unwind-protect
+          (progn
+            (switch-to-buffer scratch)
+            (setq other (llemar llemar-test-directory))
+            (cl-letf (((symbol-function 'llemar--resume-conversation)
+                       (lambda (&rest _) (ert-fail "Started duplicate session"))))
+              (should (eq (llemar-resume session) target)))
+            (should (eq (window-buffer) target))
+            (should (buffer-live-p other))
+            (should (llemar--process-live-p other))
+            (should (eq (with-current-buffer target llemar--process) process)))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest llemar-test-resume-selects-active-session-before-id ()
+  "Repeated resume during startup reuses the buffer before its ID arrives."
+  (llemar-test-with-window-setup
+    (let ((session (list "pending" :cwd llemar-test-directory
+                         :file "/tmp/pending-session.jsonl")))
+      (setq conversation (llemar-resume session))
+      (should-not llemar--session-id)
+      (let ((process llemar--process))
+        (cl-letf (((symbol-function 'llemar--resume-conversation)
+                   (lambda (&rest _) (ert-fail "Started duplicate session"))))
+          (should (eq (llemar-resume session) conversation)))
+        (should (eq llemar--process process))))))
+
+(ert-deftest llemar-test-resume-selects-active-session-by-file ()
+  "A matching session file identifies an owner even if registry IDs differ."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (should (llemar-test--wait (lambda () llemar--session-id) llemar--process))
+    (cl-letf (((symbol-function 'llemar--resume-conversation)
+               (lambda (&rest _) (ert-fail "Started duplicate session"))))
+      (should (eq (llemar-resume '("alias" :file "/tmp/mock-session.jsonl"))
+                  conversation)))))
+
+(ert-deftest llemar-test-restart-releases-previous-session-identity ()
+  "A restarted process must not claim its previous session during startup."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (should (llemar-test--wait (lambda () llemar--session-id) llemar--process))
+    (let ((session (copy-tree (assoc llemar--session-id llemar-session-registry))))
+      (cl-letf (((symbol-function 'llemar--record-session) #'ignore))
+        (llemar-restart))
+      (should-not (llemar--active-session-buffer session)))))
+
+(ert-deftest llemar-test-resume-dead-session-starts-process ()
+  "A buffer whose process died does not prevent a real resume."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (should (llemar-test--wait (lambda () llemar--session-id) llemar--process))
+    (let ((session (copy-tree (assoc llemar--session-id llemar-session-registry)))
+          (old conversation))
+      (delete-process llemar--process)
+      (setq conversation (llemar-resume session))
+      (should-not (eq conversation old))
+      (should (llemar--process-live-p conversation)))))
+
 (ert-deftest llemar-test-resume-replaces-current-conversation ()
   "Resuming saves and cleans up the current conversation."
   (llemar-test-with-window-setup

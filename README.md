@@ -224,8 +224,14 @@ pi process in the recorded directory, renders its saved history,
 and leaves a fresh prompt ready to continue. Historical file-display requests
 are passive: resuming does not reopen those files.
 
-Resuming from an existing Llemar buffer likewise saves and closes the current
-conversation after the resumed conversation starts successfully. Missing or
+If the selected session already has a live pi process in a Llemar buffer,
+`llemar-resume` switches to that buffer instead of starting a second process or
+replaying history. Its draft, running work and display state are preserved;
+the conversation you switched from stays alive too. This also prevents repeated
+resume requests from duplicating a session while it is still loading.
+
+For an inactive session, resuming from an existing Llemar buffer saves and closes
+the current conversation after the resumed conversation starts successfully. Missing or
 inaccessible recorded directories produce an explicit error without replacing
 the current conversation.
 

@@ -169,6 +169,9 @@ A window scrolled up to read earlier output is left undisturbed."
 (defvar-local llemar--streamed-blocks nil
   "Hash table of content indices that received streaming deltas.")
 
+(defvar-local llemar--session-ref nil
+  "Session file or id this buffer owns, including during resume startup.")
+
 (defvar-local llemar--session-id nil
   "The pi session id this buffer is currently driving, if known.")
 
@@ -269,7 +272,8 @@ after `new_session' or a resume."
                      (or (alist-get 'name model) (alist-get 'id model)))
                (force-mode-line-update)
                (when id
-                 (setq llemar--session-id id)
+                 (setq llemar--session-id id
+                       llemar--session-ref (or (alist-get 'sessionFile data) id))
                  (llemar--registry-put id
                                        :cwd cwd
                                        :file (alist-get 'sessionFile data)
@@ -455,6 +459,7 @@ resume that session file or id."
                 llemar-executable))
   (llemar--cancel-displays)
   (setq llemar--model-name nil llemar--session-stats nil
+        llemar--session-id nil llemar--session-ref session
         llemar--active-tools nil llemar--run-error nil)
   (setq llemar--display-root (file-name-as-directory (file-truename default-directory)))
   (let* ((conversation (current-buffer))
@@ -1629,9 +1634,24 @@ buffer is returned without being displayed."
              (signal (car err) (cdr err))))
     buffer))
 
+(defun llemar--active-session-buffer (session)
+  "Return a live conversation already owning recorded SESSION, if any."
+  (let ((id (car session))
+        (file (plist-get (cdr session) :file)))
+    (seq-find
+     (lambda (buffer)
+       (with-current-buffer buffer
+         (and (derived-mode-p 'llemar-mode)
+              (llemar--process-live-p)
+              (or (and id (equal id llemar--session-id))
+                  (and llemar--session-ref
+                       (or (equal id llemar--session-ref)
+                           (and file (equal file llemar--session-ref))))))))
+     (buffer-list))))
+
 ;;;###autoload
 (defun llemar-resume (session)
-  "Resume a recorded pi SESSION in a new conversation buffer.
+  "Select an active pi SESSION or resume it in a new conversation buffer.
 
 Interactively, choose from every recorded session, with an aligned
 working-directory column in completion UIs such as Vertico.  With a
@@ -1640,6 +1660,8 @@ The new buffer opens in the session's working directory and
 its saved history is loaded and rendered, with a fresh prompt ready to
 continue.  When called from a Llemar buffer, save its transcript and
 kill that buffer after the resumed conversation starts successfully.
+If SESSION already has a live Llemar process, select its existing buffer
+instead, leaving both conversations and their processes intact.
 
 Only sessions Llemar itself started are offered; sessions created in
 pi's own interface are not tracked."
@@ -1647,20 +1669,22 @@ pi's own interface are not tracked."
    (list (llemar--read-session
           (when current-prefix-arg
             (file-name-as-directory (expand-file-name default-directory))))))
-  (let* ((previous (when (derived-mode-p 'llemar-mode) (current-buffer)))
-         (plist (cdr session))
-         (directory (plist-get plist :cwd))
-         (_ (unless (and (stringp directory)
-                         (file-name-absolute-p directory)
-                         (file-accessible-directory-p directory))
-              (user-error "Session working directory is missing or inaccessible: %s"
-                          (or directory "[unknown]"))))
-         (ref (or (plist-get plist :file) (car session)))
-         (buffer (llemar--resume-conversation directory ref)))
-    (when previous
-      (kill-buffer previous))
-    (pop-to-buffer-same-window buffer)
-    buffer))
+  (if-let* ((buffer (llemar--active-session-buffer session)))
+      (progn (pop-to-buffer-same-window buffer) buffer)
+    (let* ((previous (when (derived-mode-p 'llemar-mode) (current-buffer)))
+           (plist (cdr session))
+           (directory (plist-get plist :cwd))
+           (_ (unless (and (stringp directory)
+                           (file-name-absolute-p directory)
+                           (file-accessible-directory-p directory))
+                (user-error "Session working directory is missing or inaccessible: %s"
+                            (or directory "[unknown]"))))
+           (ref (or (plist-get plist :file) (car session)))
+           (buffer (llemar--resume-conversation directory ref)))
+      (when previous
+        (kill-buffer previous))
+      (pop-to-buffer-same-window buffer)
+      buffer)))
 
 (defun llemar--insert-preamble (&optional no-prompt)
   "Insert the org preamble into this buffer.
@@ -1786,7 +1810,8 @@ Wait for the current run to settle before requesting manual compaction."
            (set-marker (llemar--marker) (point-max))
            (llemar--insert-preamble)
            (goto-char (point-max))
-           (setq llemar--session-id nil llemar--session-stats nil
+           (setq llemar--session-id nil llemar--session-ref nil
+                 llemar--session-stats nil
                  llemar--active-tools nil llemar--run-error nil)
            (llemar--set-status nil)
            (llemar--record-session)
