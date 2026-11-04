@@ -216,20 +216,34 @@ made by shell commands do not get diff blocks.
 
 ### Resuming a session
 
-`M-x llemar-resume` offers sessions Llemar has recorded for the current working
-directory; `C-u M-x llemar-resume` offers sessions across directories. Selecting
-one starts a pi process attached to that session, renders its saved history,
+`M-x llemar-resume` offers sessions across all recorded working directories;
+`C-u M-x llemar-resume` limits choices to the current directory. A highlighted,
+aligned working-directory column is shown by completion UIs such as Vertico,
+using standard completion affixation metadata. Selecting a session starts its
+pi process in the recorded directory, renders its saved history,
 and leaves a fresh prompt ready to continue. Historical file-display requests
 are passive: resuming does not reopen those files.
 
 Resuming from an existing Llemar buffer likewise saves and closes the current
-conversation after the resumed conversation starts successfully.
+conversation after the resumed conversation starts successfully. Missing or
+inaccessible recorded directories produce an explicit error without replacing
+the current conversation.
 
 Only sessions driven through Llemar are offered, not sessions started in pi's
 own interface. Enable `savehist-mode` to preserve Llemar's session registry
 across Emacs restarts. Sessions are listed newest-first; when Consult is
 installed, moving through candidates previews their saved Org transcripts.
-Without Consult, the picker uses ordinary `completing-read`.
+Both paths use `completing-read`, so Vertico remains the completion interface;
+Consult adds transcript previews and native directory narrowing when installed.
+The directory column shows each project's shortcut, for example `[l] ~/src/Llemar/`.
+With an empty minibuffer, type that key followed by `SPC` to narrow to its
+sessions. Clear the search text and press `DEL` to return to all projects.
+If you configured `consult-narrow-key` / `consult-widen-key`, those work too.
+Shortcuts prefer the directory's initial and otherwise use an available letter
+or digit; they are assigned deterministically from the recorded directories,
+not permanently reserved. Up to 62 directories receive shortcuts; any others
+remain available in the all-project list. Without Consult, the directory column
+and ordinary completion remain available, but not narrowing.
 
 The companion extension asks the conversation's model to use `set_session_name`
 once its overarching purpose is clear, and to correct the title when intent

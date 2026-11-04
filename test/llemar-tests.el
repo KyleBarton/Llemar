@@ -964,6 +964,55 @@ They are distinct values on the wire and must not collapse together."
           (should (equal (car (llemar--read-session)) "b")))
       (delete-file file))))
 
+(defvar consult--narrow)
+
+(ert-deftest llemar-test-consult-session-directory-narrowing ()
+  "Consult narrows by directory while preserving order, columns and preview."
+  (let* ((original-require (symbol-function 'require))
+         (llemar-session-registry
+          '(("a" :cwd "/one/project/" :time 1)
+            ("b" :cwd "/two/project/" :time 2)
+            ("c" :cwd "/one/project/" :time 3)
+            ("d" :time 4)))
+         (consult--narrow nil))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &rest args)
+                 (if (eq feature 'consult) t
+                   (apply original-require feature args))))
+              ((symbol-function 'consult--temporary-files)
+               (lambda () #'ignore))
+              ((symbol-function 'consult--buffer-preview)
+               (lambda () #'ignore))
+              ((symbol-function 'consult--read)
+               (lambda (candidates &rest options)
+                 (let* ((narrow (plist-get options :narrow))
+                        (keys (plist-get narrow :keys))
+                        (predicate (plist-get narrow :predicate)))
+                   (should-not (plist-get options :sort))
+                   (should (functionp (plist-get options :state)))
+                   (should (functionp (plist-get completion-extra-properties
+                                                  :affixation-function)))
+                   (should (= (length keys) 3))
+                   (should (= (length (delete-dups (mapcar #'car keys))) 3))
+                   (should (member "/one/project/" (mapcar #'cdr keys)))
+                   (should (member "/two/project/" (mapcar #'cdr keys)))
+                   (should (member "[unknown directory]" (mapcar #'cdr keys)))
+                   (let* ((rows (funcall (plist-get completion-extra-properties
+                                                   :affixation-function)
+                                        candidates))
+                          (key (car (rassoc "/one/project/" keys))))
+                     (should (string-match-p
+                              (regexp-quote (format "[%c] /one/project/" key))
+                              (nth 2 (nth 1 rows)))))
+                   (let ((consult--narrow
+                          (car (rassoc "/one/project/" keys))))
+                     (should (equal (seq-filter predicate candidates)
+                                    (list (nth 1 candidates) (nth 3 candidates)))))
+                   (let ((consult--narrow nil))
+                     (should (equal (seq-filter predicate candidates) candidates))))
+                 (car candidates))))
+      (should (equal (car (llemar--read-session)) "d")))))
+
 (ert-deftest llemar-test-model-session-name ()
   "A title from pi supersedes the initial prompt and is saved."
   (let ((llemar-session-registry nil))
@@ -1108,6 +1157,82 @@ They are distinct values on the wire and must not collapse together."
                  (car collection))))
       (should (equal (car (llemar--read-session "/d/")) "b")))
     (should-error (llemar--read-session "/nowhere/") :type 'user-error)))
+
+(ert-deftest llemar-test-resume-all-directories-by-default ()
+  "Interactive resume offers other directories without a prefix."
+  (let ((current-prefix-arg nil)
+        (session '("other" :cwd "/other/")))
+    (cl-letf (((symbol-function 'file-accessible-directory-p) (lambda (_) t))
+              ((symbol-function 'llemar--read-session)
+               (lambda (&optional directory)
+                 (should-not directory)
+                 session))
+              ((symbol-function 'llemar--resume-conversation)
+               (lambda (directory ref)
+                 (should (equal directory "/other/"))
+                 (should (equal ref "other"))
+                 (current-buffer)))
+              ((symbol-function 'pop-to-buffer-same-window) #'ignore))
+      (with-temp-buffer (call-interactively #'llemar-resume)))))
+
+(ert-deftest llemar-test-picker-directory-column ()
+  "Standard completion affixation supplies a highlighted directory column."
+  (let ((llemar-session-registry
+         '(("a" :cwd "/project/one/" :name "Same" :time 1)
+           ("b" :cwd "/project/two/" :name "Same" :time 1))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 (should (= (length (delete-dups (copy-sequence collection))) 2))
+                 (let* ((affix (plist-get completion-extra-properties
+                                         :affixation-function))
+                        (rows (funcall affix collection)))
+                   (should (= (length rows) 2))
+                   (should (equal (mapcar #'car rows) collection))
+                   (dolist (row rows)
+                     (should (equal (cadr row) ""))
+                     (let ((suffix (nth 2 row)))
+                       (should (string-match-p "/project/\\(one\\|two\\)/" suffix))
+                       (should (text-property-not-all 0 (length suffix)
+                                                      'face nil suffix)))))
+                 (cadr collection))))
+      (should (equal (car (llemar--read-session)) "b")))))
+
+(ert-deftest llemar-test-resume-invalid-directory-preserves-conversation ()
+  "Missing or inaccessible directories fail before replacing a conversation."
+  (llemar-test-with-window-setup
+    (setq conversation (llemar llemar-test-directory))
+    (let ((process llemar--process))
+      (dolist (directory (list nil "/llemar-no-such-directory/"))
+        (should-error (llemar-resume (list "s1" :cwd directory))
+                      :type 'user-error))
+      (cl-letf (((symbol-function 'file-accessible-directory-p)
+                 (lambda (_directory) nil)))
+        (should-error (llemar-resume (list "s1" :cwd llemar-test-directory))
+                      :type 'user-error))
+      (should (buffer-live-p conversation))
+      (should (process-live-p process))
+      (should (eq (window-buffer) conversation)))))
+
+(ert-deftest llemar-test-resume-cross-directory-process ()
+  "Resume uses the recorded directory in both Emacs and the pi process."
+  (let* ((directory (make-temp-file "llemar-other-project-" t))
+         (llemar-executable llemar-test-mock)
+         (llemar-extra-args '("resume-cwd"))
+         (llemar-session-registry nil)
+         buffer)
+    (unwind-protect
+        (progn
+          (setq buffer (llemar-resume (list "s1" :cwd directory)))
+          (with-current-buffer buffer
+            (should (equal default-directory (file-name-as-directory directory)))
+            (should (llemar-test--wait (lambda () llemar--session-id)
+                                      llemar--process))
+            (should (equal (plist-get (cdr (assoc llemar--session-id
+                                                 llemar-session-registry))
+                                     :name)
+                           (file-truename directory)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (delete-directory directory t))))
 
 (ert-deftest llemar-test-resume-is-a-command ()
   "`llemar-resume' is interactive."

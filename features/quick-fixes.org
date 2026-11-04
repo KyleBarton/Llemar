@@ -1,6 +1,6 @@
 #+title: Quick fixes
 
-* TODO Resume sessions across working directories
+* DONE Resume sessions across working directories
 =llemar-resume= should offer sessions from other folders, not just the current
 working directory. Selecting one should start the resumed conversation and its
 pi process in that session's recorded working directory, with the conversation
@@ -12,8 +12,17 @@ of replacing the current Llemar conversation. Show enough directory context in
 the picker to distinguish sessions from different projects. Handle a missing or
 inaccessible recorded directory explicitly rather than silently resuming in the
 wrong folder; a failed startup must preserve the current conversation.
-Cover cross-directory selection, buffer/process working directories, and failure
-handling with deterministic offline tests before implementing.
+Implemented with deterministic offline tests for cross-directory selection,
+buffer/process working directories, and failure handling. Resume now offers all
+directories by default; a prefix limits choices to the current directory.
+Standard completion affixation supplies an aligned, highlighted directory column
+in Vertico, retaining =completing-read= and optional Consult transcript previews.
+Identical timestamp/title labels are disambiguated by session id.
+Consult supplies native project narrowing, with shortcuts shown in the directory
+column: from empty input, type a project's key then =SPC=; clear input and press
+=DEL= to widen again. Configured Consult narrowing/widening keys also work.
+Full checks passed (94 ERT tests, 8 Node tests, compilation and checkdoc);
+live visual verification remains outstanding.
 
 * TODO Fold previous conversation headings after successful compaction
 After confirmed successful compaction, collapse all previous conversation

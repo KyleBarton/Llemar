@@ -437,6 +437,7 @@ SCENARIOS = {
     "retry": scenario_retry,
     "hang": scenario_hang,
     "resume": scenario_basic,
+    "resume-cwd": scenario_basic,
 }
 
 MESSAGE_SCRIPTS = {
@@ -486,7 +487,9 @@ def main():
                   "data": {"model": {"id": "mock/model", "name": "Mock Model"}, "thinkingLevel": "medium",
                            "isStreaming": False, "messageCount": 2,
                            "sessionId": "mock-123",
-                           "sessionFile": "/tmp/mock-session.jsonl"}})
+                           "sessionFile": "/tmp/mock-session.jsonl",
+                           **({"sessionName": os.path.realpath(os.getcwd())}
+                              if scenario == "resume-cwd" else {})}})
         elif kind == "compact":
             if scenario in ("compact-fail", "compact-cancel"):
                 emit({"type": "compaction_start", "reason": "manual"})

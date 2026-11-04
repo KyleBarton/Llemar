@@ -301,6 +301,7 @@ With DIRECTORY, keep only sessions recorded for it."
 (declare-function consult--read "consult")
 (declare-function consult--temporary-files "consult")
 (declare-function consult--buffer-preview "consult")
+(defvar consult--narrow)
 
 (defun llemar--save-transcript ()
   "Save an Org preview copy of this conversation, when its id is known.
@@ -343,24 +344,86 @@ Failures are logged rather than interrupting the RPC event stream."
                        (goto-char (point-max)))
                      buffer)))))))
 
+(defun llemar--session-affixation (choices candidates &optional narrowing)
+  "Add a directory column to CANDIDATES from CHOICES.
+When NARROWING is supplied, show its Consult shortcuts beside directories."
+  (let ((width (apply #'max 0 (mapcar #'string-width candidates))))
+    (mapcar
+     (lambda (candidate)
+       (let* ((entry (cdr (assoc candidate choices)))
+              (directory (plist-get (cdr entry) :cwd))
+              (label (if directory (abbreviate-file-name directory)
+                       "[unknown directory]"))
+              (key (car (rassoc label (plist-get narrowing :keys)))))
+         (list candidate ""
+               (concat (make-string (+ 2 (- width (string-width candidate))) ?\s)
+                       (if key (propertize (format "[%c] " key)
+                                           'face 'font-lock-keyword-face)
+                         "")
+                       (propertize label 'face 'font-lock-string-face)))))
+     candidates)))
+
+(defun llemar--session-narrowing (choices)
+  "Build Consult directory narrowing for session CHOICES.
+Assign mnemonic keys where possible, then unused letters or digits.
+At most 62 directories receive shortcuts; all sessions remain available."
+  (let* ((directories (sort (delete-dups
+                             (mapcar (lambda (choice)
+                                       (plist-get (cddr choice) :cwd))
+                                     choices))
+                            (lambda (a b) (string< (or a "") (or b "")))))
+         (available (string-to-list
+                     "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+         mapping keys)
+    (dolist (directory directories)
+      (when available
+        (let* ((name (and directory
+                          (file-name-nondirectory (directory-file-name directory))))
+               (initial (and name (> (length name) 0)
+                             (downcase (aref name 0))))
+               (key (if (memq initial available) initial (car available))))
+          (setq available (delq key available))
+          (push (cons key directory) mapping)
+          (push (cons key (if directory (abbreviate-file-name directory)
+                            "[unknown directory]"))
+                keys))))
+    (list :keys (nreverse keys)
+          :predicate
+          (lambda (candidate)
+            (or (null consult--narrow)
+                (equal (plist-get (cddr (assoc candidate choices)) :cwd)
+                       (alist-get consult--narrow mapping)))))))
+
 (defun llemar--read-session (&optional directory)
   "Read a recorded session to resume, limited to DIRECTORY when non-nil.
 Return the chosen registry entry, or signal a `user-error' if none exist."
   (let* ((sessions (llemar--registry-sessions directory))
-         (choices (mapcar (lambda (entry)
-                            (cons (llemar--session-display entry) entry))
-                          sessions)))
+         (labels (mapcar #'llemar--session-display sessions))
+         (choices (cl-mapcar
+                   (lambda (label entry)
+                     (cons (if (> (cl-count label labels :test #'equal) 1)
+                               (format "%s  [%s]" label (car entry))
+                             label)
+                           entry))
+                   labels sessions)))
     (unless choices
       (user-error "No Llemar sessions recorded%s"
                   (if directory (format " for %s" directory) "")))
-    (let* ((completion-extra-properties
-            '(:display-sort-function identity :cycle-sort-function identity))
+    (let* ((narrowing (and (require 'consult nil t)
+                           (llemar--session-narrowing choices)))
+           (completion-extra-properties
+            (list :display-sort-function #'identity
+                  :cycle-sort-function #'identity
+                  :affixation-function
+                  (lambda (candidates)
+                    (llemar--session-affixation choices candidates narrowing))))
            (candidates (mapcar #'car choices))
-           (choice (if (require 'consult nil t)
+           (choice (if narrowing
                        (consult--read candidates
                                       :prompt "Resume session: "
                                       :sort nil :require-match t
                                       :category 'llemar-session
+                                      :narrow narrowing
                                       :state (llemar--session-preview choices))
                      (completing-read "Resume session: " candidates nil t))))
       (cdr (assoc choice choices)))))
@@ -1570,9 +1633,10 @@ buffer is returned without being displayed."
 (defun llemar-resume (session)
   "Resume a recorded pi SESSION in a new conversation buffer.
 
-Interactively, choose from the sessions Llemar has driven for the
-current directory; with a prefix argument, choose from every recorded
-session.  The new buffer opens in the session's working directory and
+Interactively, choose from every recorded session, with an aligned
+working-directory column in completion UIs such as Vertico.  With a
+prefix argument, limit choices to the current directory.
+The new buffer opens in the session's working directory and
 its saved history is loaded and rendered, with a fresh prompt ready to
 continue.  When called from a Llemar buffer, save its transcript and
 kill that buffer after the resumed conversation starts successfully.
@@ -1581,11 +1645,16 @@ Only sessions Llemar itself started are offered; sessions created in
 pi's own interface are not tracked."
   (interactive
    (list (llemar--read-session
-          (unless current-prefix-arg
+          (when current-prefix-arg
             (file-name-as-directory (expand-file-name default-directory))))))
   (let* ((previous (when (derived-mode-p 'llemar-mode) (current-buffer)))
          (plist (cdr session))
-         (directory (or (plist-get plist :cwd) default-directory))
+         (directory (plist-get plist :cwd))
+         (_ (unless (and (stringp directory)
+                         (file-name-absolute-p directory)
+                         (file-accessible-directory-p directory))
+              (user-error "Session working directory is missing or inaccessible: %s"
+                          (or directory "[unknown]"))))
          (ref (or (plist-get plist :file) (car session)))
          (buffer (llemar--resume-conversation directory ref)))
     (when previous
